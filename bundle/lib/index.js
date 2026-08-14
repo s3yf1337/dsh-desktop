@@ -17,10 +17,11 @@ import z from "@deepseek-ai/schemastery";
  *
  * The client binary is an artifact of this profile, not harness logic: it is
  * resolved as `config.bin` (settable, e.g. `!!js process.env.DSH_DESKTOP_BIN`
- * in the bundle patch), then `DSH_DESKTOP_BIN`, then `dsh-desktop-shell` on
- * PATH, then `$DSH_HOME/desktop/target/{release,debug}` and
- * `~/.local/bin/dsh-desktop-shell`. When no binary exists the web surface
- * still serves — the harness degrades to browser use instead of failing.
+ * in the bundle patch), then `DSH_DESKTOP_BIN`, then the
+ * `$DSH_HOME/desktop/{target,src-tauri/target}` build outputs, then
+ * `dsh-desktop-shell` on PATH, then `~/.local/bin/dsh-desktop-shell`. When no
+ * binary exists the web surface still serves — the harness degrades to
+ * browser use instead of failing.
  */
 const name = "desktop-shell";
 
@@ -42,6 +43,17 @@ function resolveDshHome() {
 	const value = process.env.DSH_HOME;
 	if (typeof value === "string" && value.trim() !== "") return value;
 	return join(homedir(), ".dsh");
+}
+
+/** Resolve a bare executable name through PATH, if present. */
+function findOnPath(bin) {
+	const pathEnv = process.env.PATH ?? "";
+	for (const dir of pathEnv.split(process.platform === "win32" ? ";" : ":")) {
+		if (dir === "") continue;
+		const candidate = join(dir, bin);
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
 }
 
 /**
@@ -68,11 +80,14 @@ function resolveShellBinary(explicitBin) {
 		join(home, "desktop", "target", "release", "dsh-desktop-shell"),
 		join(home, "desktop", "target", "debug", "dsh-desktop-shell"),
 		join(home, "desktop", "src-tauri", "target", "release", "dsh-desktop-shell"),
-		join(home, "desktop", "src-tauri", "target", "debug", "dsh-desktop-shell"),
-		join(homedir(), ".local", "bin", "dsh-desktop-shell")
+		join(home, "desktop", "src-tauri", "target", "debug", "dsh-desktop-shell")
 	]) {
 		if (existsSync(candidate)) return candidate;
 	}
+	const onPath = findOnPath("dsh-desktop-shell");
+	if (onPath !== void 0) return onPath;
+	const local = join(homedir(), ".local", "bin", "dsh-desktop-shell");
+	if (existsSync(local)) return local;
 	return undefined;
 }
 

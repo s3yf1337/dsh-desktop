@@ -12,8 +12,9 @@ tree. The plugin (`lib/index.js`):
 - injects the `webServer` service and waits for the loader to settle (the
   port is the real OS-assigned one only after the bind);
 - resolves the native client binary: `config.bin` → `DSH_DESKTOP_BIN` →
-  `dsh-desktop-shell` on PATH → `$DSH_HOME/desktop/target/{release,debug}` →
-  `$DSH_HOME/desktop/src-tauri/target/{release,debug}` → `~/.local/bin`;
+  `$DSH_HOME/desktop/target/{release,debug}` →
+  `$DSH_HOME/desktop/src-tauri/target/{release,debug}` →
+  `dsh-desktop-shell` on PATH → `~/.local/bin/dsh-desktop-shell`;
 - spawns `dsh-desktop-shell <url>` and watches it:
   - exit 0 (window closed) → requests harness shutdown via `ctx.appExit`;
   - non-zero exit or missing binary → the web surface keeps serving

@@ -82,9 +82,9 @@ CARGO_HOME="$HOME/.dsh/.cargo-home" cargo build --release
 
 1. `config.bin` (settable in the profile patch layer) — a path must exist
 2. `$DSH_DESKTOP_BIN` — same rule
-3. `dsh-desktop-shell` on `PATH`
-4. `$DSH_HOME/desktop/target/{release,debug}/dsh-desktop-shell`
-5. `$DSH_HOME/desktop/src-tauri/target/{release,debug}/dsh-desktop-shell`
+3. `$DSH_HOME/desktop/target/{release,debug}/dsh-desktop-shell`
+4. `$DSH_HOME/desktop/src-tauri/target/{release,debug}/dsh-desktop-shell`
+5. `dsh-desktop-shell` on `PATH`
 6. `~/.local/bin/dsh-desktop-shell`
 
 If no binary is found the harness still serves the web UI (degrade to
