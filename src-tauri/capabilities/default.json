@@ -1,7 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the DeepSeek Harness main window.",
+  "description": "Default capability for the DeepSeek Harness main window: local assets plus the served loopback origin the SPA runs on, and the desktop commands the settings tab invokes (bare names resolve to the app ACL).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:default",
+    "allow-desktop-get-state",
+    "allow-desktop-set-setting",
+    "allow-desktop-check-updates",
+    "allow-desktop-open-release",
+    "allow-desktop-reset-geometry",
+    "allow-desktop-test-notification"
+  ]
 }

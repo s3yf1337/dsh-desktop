@@ -9,6 +9,12 @@ edition = "2021"
 # a WebView window on it. It spawns nothing and owns no harness logic — the
 # profile (`dsh --profile desktop`) is the entry point, this binary is just the
 # native window surface.
+#
+# Desktop features live here, in the shell: the tray icon (close-to-tray),
+# single-instance handling, window geometry persistence, native OS
+# notifications, and the GitHub release updater that *suggests* updates
+# without ever forcing them. The web surface's "dsh-desktop" settings tab
+# drives all of it through the `desktop_*` commands.
 [lib]
 name = "dsh_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -17,10 +23,21 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# GitHub releases API client (HTTPS via rustls + ring; no OpenSSL).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+semver = { version = "1", features = ["serde"] }
+# Open the browser on the release page ("suggest update" is the whole point).
+open = "5"
+# Periodic updater sleeps (tauri's async runtime is tokio underneath).
+tokio = { version = "1", features = ["time"] }
 
 # Local patch: tao unconditionally installs its own GtkHeaderBar (CSD
 # titlebar) on every Wayland window, forcing a GNOME-style header even on

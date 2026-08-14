@@ -1,0 +1,145 @@
+//! Tauri commands behind the settings tab. The web surface's "dsh-desktop"
+//! section calls these via `window.__TAURI__.core.invoke`; every mutating
+//! command emits `desktop://state` so open tabs refresh live.
+
+use tauri::{AppHandle, Manager};
+
+use crate::settings::DesktopState;
+use crate::AppState;
+
+/// Snapshot the whole desktop state (settings + update status).
+pub fn snapshot(app: &AppHandle) -> DesktopState {
+	let state = app.state::<AppState>();
+	let settings = state.settings.lock().unwrap().clone();
+	let update = state.update.lock().unwrap().clone();
+	let last_update_check = state.last_check.lock().unwrap().clone();
+	let update_check_error = state.check_error.lock().unwrap().clone();
+	DesktopState {
+		version: env!("CARGO_PKG_VERSION").to_string(),
+		settings,
+		update,
+		last_update_check,
+		update_check_error,
+		client: true,
+	}
+}
+
+/// Read the full desktop state.
+#[tauri::command]
+pub fn desktop_get_state(app: AppHandle) -> DesktopState {
+	snapshot(&app)
+}
+
+/// Update one settings key (`tray`, `notifications`, `auto_update_check`,
+/// `update_interval_hours`) and persist it. Returns the new state.
+#[tauri::command]
+pub fn desktop_set_setting(app: AppHandle, key: String, value: serde_json::Value) -> Result<DesktopState, String> {
+	let state = app.state::<AppState>();
+	let mut settings = state.settings.lock().unwrap();
+	let changed = match key.as_str() {
+		"tray" => match value.as_bool() {
+			Some(b) => {
+				let changed = settings.tray != b;
+				settings.tray = b;
+				changed
+			}
+			None => return Err("tray expects a boolean".into()),
+		},
+		"notifications" => match value.as_bool() {
+			Some(b) => {
+				let changed = settings.notifications != b;
+				settings.notifications = b;
+				changed
+			}
+			None => return Err("notifications expects a boolean".into()),
+		},
+		"auto_update_check" => match value.as_bool() {
+			Some(b) => {
+				let changed = settings.auto_update_check != b;
+				settings.auto_update_check = b;
+				changed
+			}
+			None => return Err("auto_update_check expects a boolean".into()),
+		},
+		"update_interval_hours" => match value.as_u64() {
+			Some(n) => {
+				let changed = settings.update_interval_hours != n;
+				settings.update_interval_hours = n;
+				changed
+			}
+			None => return Err("update_interval_hours expects a number".into()),
+		},
+		_ => return Err(format!("unknown setting: {key}")),
+	};
+	let notifications_enabled = settings.notifications;
+	let tray_enabled = settings.tray;
+	let config_dir = app.path().app_config_dir().unwrap_or_default();
+	crate::settings::save(&config_dir, &settings);
+	drop(settings);
+	drop(state);
+	if changed {
+		if key == "notifications" && notifications_enabled {
+			use tauri_plugin_notification::NotificationExt;
+			let _ = app.notification().request_permission();
+		}
+		if key == "tray" && !tray_enabled {
+			// Never strand the user: with the tray off, a hidden window would
+			// be unreachable — show it.
+			if let Some(win) = app.get_webview_window("main") {
+				if win.is_visible().unwrap_or(false) == false {
+					let _ = win.show();
+					let _ = win.set_focus();
+				}
+			}
+		}
+		crate::update::emit_and_rebuild(&app);
+	}
+	Ok(snapshot(&app))
+}
+
+/// Run an update check right now and report the outcome (suggests, never
+/// applies anything).
+#[tauri::command]
+pub async fn desktop_check_updates(app: AppHandle) -> Result<DesktopState, String> {
+	crate::update::run_check(&app, true).await;
+	Ok(snapshot(&app))
+}
+
+/// Open the release page for the available update (or the releases page when
+/// nothing newer was found) in the default browser.
+#[tauri::command]
+pub fn desktop_open_release(app: AppHandle) -> Result<(), String> {
+	let state = app.state::<AppState>();
+	let url = state
+		.update
+		.lock()
+		.unwrap()
+		.as_ref()
+		.map(|info| info.url.clone())
+		.unwrap_or_else(|| crate::updater::RELEASES_URL.to_string());
+	eprintln!("dsh-desktop: opening {url}");
+	open::that(&url).map_err(|error| error.to_string())
+}
+
+/// Reset the window to the default size/position and forget the saved
+/// geometry (the window-state plugin's file is removed).
+#[tauri::command]
+pub fn desktop_reset_geometry(app: AppHandle) -> Result<(), String> {
+	let win = app.get_webview_window("main").ok_or("no main window")?;
+	let _ = win.unmaximize();
+	win.set_size(tauri::LogicalSize::new(1280.0, 860.0)).map_err(|e| e.to_string())?;
+	win.center().map_err(|e| e.to_string())?;
+	// The window-state plugin persists to `<config>/.window-state.json`.
+	if let Ok(dir) = app.path().app_config_dir() {
+		let _ = std::fs::remove_file(dir.join(".window-state.json"));
+	}
+	crate::update::emit_and_rebuild(&app);
+	Ok(())
+}
+
+/// Send a test notification (for the settings tab's preview button).
+#[tauri::command]
+pub fn desktop_test_notification(app: AppHandle) -> Result<(), String> {
+	crate::update::notify(&app, "dsh-desktop", "Notifications work!");
+	Ok(())
+}

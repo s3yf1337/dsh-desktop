@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-check-updates"
+description = "Enables the desktop_check_updates command without any pre-configured scope."
+commands.allow = ["desktop_check_updates"]
+
+[[permission]]
+identifier = "deny-desktop-check-updates"
+description = "Denies the desktop_check_updates command without any pre-configured scope."
+commands.deny = ["desktop_check_updates"]
