@@ -89,15 +89,21 @@ pub fn run() {
 		std::process::exit(2);
 	}
 
-	let app = tauri::Builder::default()
-		// A second `dsh-desktop` focuses the existing window instead of
-		// stacking a duplicate harness+window pair.
-		.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+	let mut builder = tauri::Builder::default();
+
+	// A second `dsh-desktop` focuses the existing window instead of stacking a
+	// duplicate harness+window pair. `DSH_DESKTOP_NO_SINGLE_INSTANCE=1` opts
+	// out (running two harnesses side by side, e.g. for development).
+	if std::env::var_os("DSH_DESKTOP_NO_SINGLE_INSTANCE").is_none() {
+		builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
 			if let Some(win) = app.get_webview_window("main") {
 				let _ = win.show();
 				let _ = win.set_focus();
 			}
-		}))
+		}));
+	}
+
+	let app = builder
 		// Remember window geometry across restarts (size, position, maximized;
 		// never the hidden/visible flag — a restart must show the window).
 		.plugin(
@@ -123,6 +129,11 @@ pub fn run() {
 		.setup(|app| {
 			// reqwest is built with `rustls-no-provider`; ring is the provider.
 			let _ = rustls::crypto::ring::default_provider().install_default();
+
+			// The GTK application name becomes the system tray item's title
+			// (libappindicator derives the SNI Title from it), so hovering the
+			// tray icon shows "DeepSeek Harness", not the binary's name.
+			glib::set_application_name("DeepSeek Harness");
 
 			// Load persisted preferences into the managed state.
 			let config_dir = app.path().app_config_dir()?;
@@ -152,6 +163,37 @@ pub fn run() {
 				let handle = app.handle().clone();
 				tauri::async_runtime::spawn(async move {
 					update::periodic_loop(handle).await;
+				});
+			}
+
+			// Control channel: the profile's desktop-shell plugin pipes JSON
+			// control messages into our stdin (agent lifecycle → notifications).
+			// Read them on a background thread; the client's stdin is otherwise
+			// unused.
+			{
+				let handle = app.handle().clone();
+				std::thread::spawn(move || {
+					use std::io::BufRead;
+					let stdin = std::io::stdin();
+					for line in stdin.lock().lines() {
+						let Ok(line) = line else { break };
+						let line = line.trim();
+						if line.is_empty() {
+							continue;
+						}
+						let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+							continue;
+						};
+						if message.get("event").and_then(|v| v.as_str()) != Some("notify") {
+							continue;
+						}
+						let title = message
+							.get("title")
+							.and_then(|v| v.as_str())
+							.unwrap_or("DeepSeek Harness");
+						let body = message.get("body").and_then(|v| v.as_str()).unwrap_or("");
+						update::control_notify(&handle, title, body);
+					}
 				});
 			}
 			Ok(())

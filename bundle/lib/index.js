@@ -90,7 +90,102 @@ function apply(ctx, config) {
 	const settled = ctx.get("loader")?.await();
 	const exit = ctx.get("appExit");
 	let child;
+
+	// Agent-lifecycle state for notification translation: the harness emits
+	// app-level events the desktop shell mirrors into OS notifications through
+	// the client's stdin control channel.
+	const titles = new Map();
+	const running = new Map();
+
+	/**
+	 * Send one JSON control message to the native client's stdin. The client
+	 * reads the pipe on a background thread; a missing or dead client makes
+	 * this a no-op (the web surface keeps working regardless).
+	 * @param message - control message, e.g. { event: "notify", title, body }.
+	 */
+	const writeControl = (message) => {
+		if (child === void 0 || child.stdin === null || child.stdin.destroyed) return;
+		try {
+			child.stdin.write(JSON.stringify(message) + "\n");
+		} catch {
+			// pipe closed; nothing to do
+		}
+	};
+
+	/** Human-readable error text for a notification body. */
+	const errorText = (error, sessionId) => {
+		const detail = error instanceof Error ? error.message : String(error ?? "unknown error");
+		const trimmed = detail.length > 160 ? detail.slice(0, 157) + "…" : detail;
+		return `Session ${sessionId ?? "?"}: ${trimmed}`;
+	};
+
+	/** Extract the first question from an ask_user_question tool call. */
+	const questionText = (args) => {
+		let parsed = args;
+		if (typeof parsed === "string") {
+			try {
+				parsed = JSON.parse(parsed);
+			} catch {
+				return "The agent is asking you a question.";
+			}
+		}
+		const first = Array.isArray(parsed?.questions) ? parsed.questions[0] : void 0;
+		if (first !== void 0 && typeof first.question === "string") {
+			const header = typeof first.header === "string" && first.header !== "" ? `${first.header}: ` : "";
+			return header + first.question;
+		}
+		return "The agent is asking you a question.";
+	};
+
+	// Mirror agent lifecycle into notifications. All subscriptions are app-level
+	// cordis events; listeners are disposed with the plugin.
+	const disposeListeners = [];
+	if (typeof ctx.on === "function") {
+		disposeListeners.push(ctx.on("agent/status", ({ agent, status }) => {
+			const id = agent?.id;
+			if (id === void 0) return;
+			const wasRunning = running.get(id) ?? false;
+			const isRunning = status === "running";
+			running.set(id, isRunning);
+			if (wasRunning && !isRunning) {
+				const title = titles.get(id);
+				writeControl({
+					event: "notify",
+					title: "Agent finished",
+					body: typeof title === "string" && title !== ""
+						? `"${title}" — work complete.`
+						: `Session ${id} finished its work.`
+				});
+			}
+		}));
+		disposeListeners.push(ctx.on("agent/error", ({ agent, error }) => {
+			writeControl({
+				event: "notify",
+				title: "Agent error",
+				body: errorText(error, agent?.id)
+			});
+		}));
+		disposeListeners.push(ctx.on("session/event", (session, event) => {
+			if (event?.type === "session/title" && typeof event.data?.title === "string") {
+				titles.set(session?.id, event.data.title);
+			} else if (event?.type === "tool/call" && event.data?.name === "ask_user_question") {
+				writeControl({
+					event: "notify",
+					title: "Question",
+					body: questionText(event.data.arguments)
+				});
+			}
+		}));
+	}
+
 	ctx.effect(() => () => {
+		for (const dispose of disposeListeners) {
+			try {
+				dispose();
+			} catch {
+				// disposal is best-effort
+			}
+		}
 		if (child !== void 0 && child.exitCode === null && !child.killed) child.kill("SIGTERM");
 	});
 	const open = () => {
@@ -122,7 +217,9 @@ function apply(ctx, config) {
 		ctx.logger.info(`desktop-shell: opening ${url} with ${bin}`);
 		child = spawn(bin, [url], {
 			env: { ...process.env, DSH_HOME: resolveDshHome() },
-			stdio: "inherit"
+			// stdin is the control pipe (agent lifecycle notifications); the
+			// client's stdout/stderr stay on the harness terminal.
+			stdio: ["pipe", "inherit", "inherit"]
 		});
 		child.on("error", (error) => {
 			console.error(`dsh desktop: failed to start ${bin}: ${error.message}; keeping the web surface at ${url}`);

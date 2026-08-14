@@ -38,6 +38,9 @@ semver = { version = "1", features = ["serde"] }
 open = "5"
 # Periodic updater sleeps (tauri's async runtime is tokio underneath).
 tokio = { version = "1", features = ["time"] }
+# Set the GTK application name so the system tray (libappindicator) shows
+# "DeepSeek Harness" instead of the binary name on hover.
+glib = "0.18"
 
 # Local patch: tao unconditionally installs its own GtkHeaderBar (CSD
 # titlebar) on every Wayland window, forcing a GNOME-style header even on

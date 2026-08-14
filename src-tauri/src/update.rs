@@ -116,6 +116,23 @@ pub fn notify(app: &AppHandle, title: &str, body: &str) {
 	}
 }
 
+/// Gate a control-channel notification (agent lifecycle events from the
+/// harness): respect the `notifications` setting and skip when the user is
+/// actively looking at the window — a notification for something the user is
+/// already watching is just noise.
+pub fn control_notify(app: &AppHandle, title: &str, body: &str) {
+	let enabled = app.state::<AppState>().settings.lock().unwrap().notifications;
+	if !enabled {
+		return;
+	}
+	if let Some(win) = app.get_webview_window("main") {
+		if win.is_focused().unwrap_or(false) {
+			return;
+		}
+	}
+	notify(app, title, body);
+}
+
 /// Whether the app is in the middle of quitting (tray Quit) — the window
 /// close handler must not swallow the close in that case.
 pub fn quitting(app: &AppHandle) -> bool {
