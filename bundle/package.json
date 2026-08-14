@@ -1,17 +1,23 @@
 {
   "name": "dsh-desktop-shell",
   "version": "0.1.0",
-  "description": "The dsh desktop profile bundle: opens the native Tauri render client on the served web surface.",
+  "description": "The dsh desktop profile bundle: opens the native Tauri render client on the served web surface and adds the dsh-desktop settings tab to the web UI.",
   "private": false,
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
+    "lib/client.js",
+    "lib/types/client/index.d.ts",
     "cordis.patch.yml"
   ],
   "license": "MIT",
@@ -22,6 +28,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "dependencies": {
