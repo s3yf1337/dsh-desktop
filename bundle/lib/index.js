@@ -17,9 +17,8 @@ import z from "@deepseek-ai/schemastery";
  *
  * The client binary is an artifact of this profile, not harness logic: it is
  * resolved as `config.bin` (settable, e.g. `!!js process.env.DSH_DESKTOP_BIN`
- * in the bundle patch), then `DSH_DESKTOP_BIN`, then the
- * `$DSH_HOME/desktop/{target,src-tauri/target}` build outputs, then
- * `dsh-desktop-shell` on PATH, then `~/.local/bin/dsh-desktop-shell`. When no
+ * in the bundle patch), then `DSH_DESKTOP_BIN`, then `dsh-desktop-shell` on
+ * PATH (the copy the repo's `install.sh` puts in `~/.local/bin`). When no
  * binary exists the web surface still serves — the harness degrades to
  * browser use instead of failing.
  */
@@ -75,15 +74,6 @@ function resolveShellBinary(explicitBin) {
 		}
 		return value;
 	}
-	const home = resolveDshHome();
-	for (const candidate of [
-		join(home, "desktop", "target", "release", "dsh-desktop-shell"),
-		join(home, "desktop", "target", "debug", "dsh-desktop-shell"),
-		join(home, "desktop", "src-tauri", "target", "release", "dsh-desktop-shell"),
-		join(home, "desktop", "src-tauri", "target", "debug", "dsh-desktop-shell")
-	]) {
-		if (existsSync(candidate)) return candidate;
-	}
 	const onPath = findOnPath("dsh-desktop-shell");
 	if (onPath !== void 0) return onPath;
 	const local = join(homedir(), ".local", "bin", "dsh-desktop-shell");
@@ -122,8 +112,8 @@ function apply(ctx, config) {
 			// so the actionable message must be visible on the terminal too.
 			console.error(
 				"dsh desktop: no native client found; keeping the web surface at " +
-					`${url} — build it with 'cd ~/.dsh/desktop/src-tauri && cargo build --release' ` +
-					"(or run ~/.dsh/desktop/install.sh), or set DSH_DESKTOP_BIN"
+					`${url} — install it by running ./install.sh in the dsh-desktop repo ` +
+					"(github.com/s3yf1337/dsh-desktop), or set DSH_DESKTOP_BIN"
 			);
 			ctx.logger.warn(`desktop-shell: no native client found; keeping the web surface at ${url}`);
 			return;

@@ -17,7 +17,7 @@
       inject: [webServer]
       config:
         # Explicit client binary path; unset resolves in order:
-        # DSH_DESKTOP_BIN > `dsh-desktop-shell` on PATH > $DSH_HOME/desktop/target
-        # (release, then debug) > ~/.local/bin/dsh-desktop-shell.
+        # DSH_DESKTOP_BIN > `dsh-desktop-shell` on PATH (the repo's
+        # install.sh puts it in ~/.local/bin).
         bin: !!js process.env.DSH_DESKTOP_BIN
         title: DeepSeek Harness
