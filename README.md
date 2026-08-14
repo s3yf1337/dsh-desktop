@@ -45,12 +45,20 @@ dsh-desktop tab drives it directly through the `desktop_*` commands.
 - **Window geometry** — size/position/maximized are remembered across
   restarts (`tauri-plugin-window-state`); a "Reset" button in the settings
   tab restores the defaults.
-- **Native notifications** — OS notifications for update availability and
-  tray hints; a "Send test notification" button checks your environment.
+- **Native notifications** — OS notifications for update availability,
+  tray hints, and agent lifecycle events; a "Send test notification" button
+  checks your environment.
 - **Updater (suggest-only)** — periodically checks `s3yf1337/dsh-desktop`
   releases on GitHub, compares semver, and *suggests* the update (tray menu
   entry, settings banner, notification). It never downloads or installs
   anything — "Open release" takes you to the release page.
+- **Agent lifecycle notifications** — the desktop-shell plugin pipes agent
+  events into the client over a stdin control channel, and the client shows
+  native notifications for: the agent finishing work (`agent/status`
+  running→idle, with the session title when available), agent errors
+  (`agent/error`), and the agent asking a question (`ask_user_question`).
+  Notifications are suppressed while the window is focused and respect the
+  `notifications` setting.
 - **Settings tab** — Settings → **dsh-desktop** in the web UI: toggles for
   tray, notifications, and automatic update checks, the check interval,
   check-now, release page, geometry reset, and version info. In a plain
@@ -161,3 +169,10 @@ The `dsh-desktop` launcher resolves the `dsh` CLI in this order:
 `DSH_HOME` is inherited, and defaults to `$HOME/.dsh` when unset. The client
 spawns with the profile's environment (`DSH_HOME` passed through), and the
 harness's own logs appear in the terminal you launched from.
+
+The native client also honors:
+
+- `DSH_DESKTOP_NO_SINGLE_INSTANCE=1` — skip the single-instance guard so a
+  second harness can run side by side (development/debugging).
+- `DSH_DESKTOP_BIN` — an explicit client binary path (see "Client binary
+  resolution").
