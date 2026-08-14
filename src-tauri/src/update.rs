@@ -101,7 +101,8 @@ pub fn emit_and_rebuild(app: &AppHandle) {
 	tray::rebuild(app);
 }
 
-/// Native OS notification (respects the `notifications` setting).
+/// Send a native OS notification. Callers decide whether the `notifications`
+/// setting gates this; failures are logged, never fatal.
 pub fn notify(app: &AppHandle, title: &str, body: &str) {
 	use tauri_plugin_notification::NotificationExt;
 	if let Err(error) = app
