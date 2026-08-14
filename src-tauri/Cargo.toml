@@ -22,6 +22,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 
+# Local patch: tao unconditionally installs its own GtkHeaderBar (CSD
+# titlebar) on every Wayland window, forcing a GNOME-style header even on
+# tiling compositors like driftwm whose SSD mode already provides the chrome.
+# The patch removes that forced header entirely, so GTK3 negotiates
+# xdg-decoration with the compositor and the environment decides: SSD (no
+# titlebar) on driftwm, a normal titlebar on GNOME/KDE. See
+# vendor/tao/README.dsh-patch.
+[patch.crates-io]
+tao = { path = "vendor/tao" }
+
 [profile.release]
 strip = true
 lto = true

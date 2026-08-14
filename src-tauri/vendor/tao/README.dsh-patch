@@ -1,0 +1,50 @@
+# dsh-desktop patch for tao
+
+Vendored copy of `tao 0.35.3` (from the dsh CARGO_HOME registry) with one
+local change, wired in via `[patch.crates-io]` in `../Cargo.toml`.
+
+## Why
+
+tao unconditionally installed a `GtkHeaderBar` (client-side titlebar) on every
+Wayland window:
+
+```rust
+if is_wayland {
+    WlHeader::setup(&window, &attributes.title);
+}
+```
+
+That forced a GNOME-style header bar with a title and
+minimize/maximize/close buttons on *every* compositor — including tiling
+ones like driftwm, which already draw their own SSD chrome and want no client
+titlebar. The `GTK_CSD=0` environment hint cannot help, because tao explicitly
+calls `gtk_window_set_titlebar()` itself.
+
+## The change
+
+`src/platform_impl/linux/window.rs` — the forced header installation is
+removed entirely (call site and the now-unused `WlHeader` import):
+
+```rust
+let window = window_builder.build();
+
+// (no WlHeader::setup call — the compositor decides)
+```
+
+With no client titlebar, GTK3 negotiates `xdg-decoration` with the compositor,
+so the *environment* decides:
+
+- **driftwm** (SSD, `default_mode = "minimal"`, `GTK_CSD=0`) — border/shadow
+  only, no titlebar. This is the desired behavior for the dsh desktop shell
+  on a tiling WM.
+- **GNOME / KDE** — the compositor serves a normal titlebar (or GTK draws its
+  own CSD), so desktop users see a regular window.
+
+X11/XWayland is unaffected — the code path was Wayland-only.
+
+## How to refresh this copy
+
+```sh
+cp -r ~/.dsh/.cargo-home/registry/src/index.crates.io-*/tao-0.35.3 vendor/tao
+# then remove the WlHeader::setup call + import, keep this README
+```
