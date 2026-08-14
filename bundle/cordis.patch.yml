@@ -1,0 +1,23 @@
+# The dsh-desktop-shell bundle patch: the native window client over the web
+# surface.
+#
+# Applied after dsh-base + dsh-web-app, so the whole browser stack (webserver,
+# web-runtime, client roster) is already mounted; this bundle only adds the
+# row that opens the native window on the served loopback URL.
+#
+# The row injects webServer so it mounts only after the server service exists,
+# then waits for the loader to settle — the port is the real OS-assigned one
+# only after the bind — and spawns the native client (`dsh-desktop-shell`)
+# with that URL. The client is a plain render surface: it shows the same
+# origin a browser would, and its exit (window closed) shuts the harness down.
+
+- insert:
+    - id: desktop-shell
+      name: 'dsh-desktop-shell'
+      inject: [webServer]
+      config:
+        # Explicit client binary path; unset resolves in order:
+        # DSH_DESKTOP_BIN > `dsh-desktop-shell` on PATH > $DSH_HOME/desktop/target
+        # (release, then debug) > ~/.local/bin/dsh-desktop-shell.
+        bin: !!js process.env.DSH_DESKTOP_BIN
+        title: DeepSeek Harness

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepSeek Harness</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #0b0e14;
+        color: #d6dee8;
+      }
+      .wrap { text-align: center; }
+      .logo {
+        width: 56px; height: 56px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #1f6feb, #388bfd);
+        display: grid; place-items: center;
+        font-weight: 700; font-size: 26px; color: #fff;
+        margin: 0 auto 18px;
+        box-shadow: 0 8px 30px rgba(31,111,235,.4);
+      }
+      .title { font-size: 18px; font-weight: 600; }
+      .hint { margin-top: 8px; font-size: 13px; color: #8b949e; }
+      .spin {
+        width: 26px; height: 26px; margin: 22px auto 0;
+        border: 3px solid rgba(214,222,232,.15);
+        border-top-color: #388bfd;
+        border-radius: 50%;
+        animation: r .8s linear infinite;
+      }
+      @keyframes r { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">DH</div>
+      <div class="title">Starting DeepSeek Harness…</div>
+      <div class="hint">Booting the web profile in a local window</div>
+      <div class="spin"></div>
+    </div>
+  </body>
+</html>

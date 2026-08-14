@@ -1,0 +1,13 @@
+# Rust / Tauri build output
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+
+# Runtime/local
+.xdg/
+*.log
+pnpm-dir/
+.DS_Store

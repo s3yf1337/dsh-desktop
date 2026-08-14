@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# dsh-desktop — launcher for the dsh desktop profile.
+#
+# The desktop experience lives in a real profile: `dsh --profile desktop`
+# boots the full harness (the web surface) and the profile's desktop-shell
+# plugin spawns the native window client on the served URL. This wrapper is
+# only a thin alias so application menus and PATH users can say `dsh-desktop`
+# instead of `dsh --profile desktop`.
+set -euo pipefail
+
+DSH="${DSH_DESKTOP_DSH:-${DSH_BIN:-dsh}}"
+if ! command -v "$DSH" >/dev/null 2>&1; then
+  for c in "$HOME/.npm-global/bin/dsh" "$HOME/.local/bin/dsh" "$HOME/bin/dsh"; do
+    if [[ -x "$c" ]]; then DSH="$c"; break; fi
+  done
+fi
+
+exec "$DSH" --profile desktop "$@"
