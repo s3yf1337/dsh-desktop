@@ -252,7 +252,6 @@ fn run_window(raw: String) -> i32 {
 			commands::desktop_open_release,
 			commands::desktop_reset_geometry,
 			commands::desktop_test_notification,
-			commands::desktop_pick_directory,
 			commands::desktop_is_directory,
 			commands::desktop_update_now,
 			commands::desktop_install_info,
