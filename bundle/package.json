@@ -18,6 +18,7 @@
     "lib/index.js",
     "lib/client.js",
     "lib/types/client/index.d.ts",
+    "lib/assets/mermaid.min.js",
     "cordis.patch.yml"
   ],
   "license": "MIT",

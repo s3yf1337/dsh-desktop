@@ -12,3 +12,6 @@ node_modules/
 pnpm-dir/
 .DS_Store
 .dsh-vision-toolkit/
+
+# Local test instance home (never committed)
+.test-home/

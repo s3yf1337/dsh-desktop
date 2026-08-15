@@ -458,6 +458,403 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			edge("dshd-resize-sw", "SouthWest");
 		}
 
+		// ── external links → system browser ──────────────────────────────────
+		// The native webview has no handler for the SPA's `target="_blank"`
+		// links, so they silently do nothing. Route them to the OS browser via
+		// the shell's `desktop_open_path` command instead. Installed once.
+		function installExternalLinks() {
+			if (!hasTauri() || typeof document === "undefined" || document.getElementById("dshd-external-links")) return;
+			// Install-once token (idempotent under re-mount).
+			const token = document.createElement("span");
+			token.id = "dshd-external-links";
+			token.style.display = "none";
+			document.body.appendChild(token);
+
+			// Sandboxes preview iframes use their own dshd-file bridge — their
+			// document is separate, so a global capture listener never sees
+			// those clicks. Only top-level http(s)/mailto/_blank links drop in.
+			document.addEventListener(
+				"click",
+				(event) => {
+					try {
+						// Let the webview default happen for right-clicks and
+						// any modifier-key navigation (new tab / new window).
+						if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+						const anchor = event.target && typeof event.target.closest === "function" ? event.target.closest("a[href]") : null;
+						if (!anchor) return;
+						const href = anchor.getAttribute("href") || "";
+						// Never hand a javascript: URL to the OS opener, even if
+						// the anchor also carries target=_blank / rel=external.
+						if (/^javascript:/i.test(href)) return;
+						const external =
+							/^(https?:|mailto:)/i.test(href) || anchor.target === "_blank" || (anchor.rel || "").split(/\s+/).includes("external");
+						if (!external) return;
+						event.preventDefault();
+						event.stopPropagation();
+						window.__TAURI__.core
+							.invoke("desktop_open_path", { path: href })
+							.catch((caught) => console.error(`dsh-desktop: cannot open ${href}:`, errText(caught)));
+					} catch (caught) {
+						console.error("dsh-desktop: external-link handler failed:", errText(caught));
+					}
+				},
+				true
+			);
+
+			// The SPA may hand the webview an explicit window.open for
+			// external addresses (buttons that shell out). Keep those working.
+			const originalOpen = window.open && window.open.bind(window);
+			window.open = (url, target, features) => {
+				const href = String(url || "");
+				if (/^(https?:|mailto:)/i.test(href)) {
+					window.__TAURI__.core
+						.invoke("desktop_open_path", { path: href })
+						.catch((caught) => console.error(`dsh-desktop: cannot open ${href}:`, errText(caught)));
+					// A permissive dummy Window-ish handle so callers that
+					// hold the return value don't crash on a null reference.
+					return { closed: false, focus() {}, blur() {}, close() {} };
+				}
+				return originalOpen ? originalOpen(url, target, features) : null;
+			};
+		}
+
+		// ── Ctrl/Cmd+F quick search over the visible chat ───────────────────
+		// A lightweight plain-DOM overlay (no React): type to highlight every
+		// case-insensitive substring of the message text, ↑/↓ or Enter/Shift+
+		// Enter to move the "current" highlight, Esc to leave. Live because
+		// streaming re-renders the chat — a debounced MutationObserver re-applies
+		// the query while the overlay is open. Native only; single install.
+		function installChatSearch() {
+			if (!hasTauri() || typeof document === "undefined") return;
+			// Idempotent: a module-level flag survives re-mounts even after the
+			// overlay is removed, so the listener + observer are installed once.
+			if (installChatSearch.installed) return;
+			installChatSearch.installed = true;
+
+			const overlay = document.createElement("div");
+			const input = document.createElement("input");
+			const count = document.createElement("span");
+			const prevBtn = document.createElement("button");
+			const nextBtn = document.createElement("button");
+			const closeBtn = document.createElement("button");
+			let currentIndex = -1;
+			let activeQuery = "";
+			let observer = null;
+
+			const containerEl = () => document.querySelector("[data-conversation-scroll]");
+
+			// Overlay chrome — fixed top-center, above everything, in the app's
+			// own alias tokens so it looks native (same bar language as the
+			// title bar / explorer).
+			overlay.id = "dshd-chat-search";
+			overlay.style.cssText =
+				"position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:100000;" +
+				"display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:10px;" +
+				"background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);" +
+				"box-shadow:0 6px 24px rgba(0,0,0,.28);font-size:13px;font-family:var(--dsw-font-family)";
+			const styleEl = document.createElement("style");
+			styleEl.textContent =
+				"mark.dshd-chat-mark{background:var(--dsw-alias-state-warn-primary,#e8a13a);color:#000;border-radius:2px;padding:0 1px}" +
+				"mark.dshd-chat-mark.dshd-chat-current{outline:2px solid var(--dsw-alias-state-info-primary,#4f6ef7)}" +
+				"#dshd-chat-search input{flex:1;min-width:180px;background:transparent;border:1px solid var(--dsw-alias-border-l2);" +
+				"border-radius:6px;color:var(--dsw-alias-label-primary);padding:4px 8px;font:inherit;outline:none}" +
+				"#dshd-chat-search input:focus{border-color:var(--dsw-alias-border-l3)}" +
+				"#dshd-chat-search button{display:grid;place-items:center;width:26px;height:26px;border:none;border-radius:6px;" +
+				"background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit}" +
+				"#dshd-chat-search button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}" +
+				"#dshd-chat-search .dshd-count{min-width:38px;text-align:center;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}";
+			document.head.appendChild(styleEl);
+
+			input.type = "text";
+			input.placeholder = "Search chat…";
+			input.setAttribute("aria-label", "Search chat");
+			count.className = "dshd-count";
+			count.textContent = "no matches";
+			prevBtn.title = "Previous match (Shift+Enter / ↑)";
+			prevBtn.innerHTML = "&#8593;";
+			nextBtn.title = "Next match (Enter / ↓)";
+			nextBtn.innerHTML = "&#8595;";
+			closeBtn.title = "Close (Esc)";
+			closeBtn.innerHTML = "&#215;";
+
+			overlay.append(input, count, prevBtn, nextBtn, closeBtn);
+
+			// ── match management ──
+			// Highlights NEVER touch the chat DOM: wrapping matches in marks
+			// inside the SPA's message tree fights React's reconciliation (a
+			// re-render deletes the split-off text nodes). Instead each match
+			// is a fixed-position overlay mark on document.body, placed via
+			// Range.getBoundingClientRect() and re-placed on scroll/resize/
+			// re-render. The messages stay byte-identical.
+			/** {range, el}[] for the current query (el = overlay mark). */
+			let matches = [];
+
+			/** Drop all overlay marks (the chat DOM is untouched by design). */
+			function clearMarks() {
+				for (const match of matches) {
+					try {
+						match.el.remove();
+					} catch {
+						// already detached
+					}
+				}
+				matches = [];
+				totalCount = 0;
+				currentIndex = -1;
+			}
+
+			function scrollCurrentIntoView() {
+				const match = matches[currentIndex];
+				if (!match) return;
+				const node = match.range.startContainer;
+				const el = node && node.nodeType === 3 ? node.parentElement : node;
+				if (!el) return;
+				try {
+					el.scrollIntoView({ block: "center" });
+				} catch {
+					// older webviews may not accept the options object
+					el.scrollIntoView();
+				}
+			}
+
+			/** Re-place every overlay mark over its range's current viewport
+			* rect (rAF-throttled by callers; cheap when the layout is idle). */
+			function positionMarks() {
+				for (const match of matches) {
+					const rect = match.range.getBoundingClientRect();
+					if (rect.width === 0 || rect.height === 0) {
+						// Off-DOM (React replaced the message) or display:none —
+						// hide until the next re-measure brings it back.
+						match.el.style.display = "none";
+						continue;
+					}
+					match.el.style.display = "block";
+					// Glyph ink can slightly overflow the range rect (kerning,
+					// antialiasing) — pad a little so the mark fully covers the
+					// matched word instead of slicing its last letters.
+					match.el.style.left = `${rect.left - 2}px`;
+					match.el.style.top = `${rect.top - 1}px`;
+					match.el.style.width = `${Math.max(rect.width + 4, 2)}px`;
+					match.el.style.height = `${rect.height + 2}px`;
+				}
+			}
+
+			/** Update the count label + current-mark outline after navigation. */
+			/** Total matches found (may exceed the shown/capped marks). */
+			let totalCount = 0;
+
+			/** Update the count label + current-mark outline after navigation. */
+			function updateCurrent() {
+				for (const match of matches) match.el.classList.remove("dshd-chat-current");
+				const match = matches[currentIndex];
+				if (match) match.el.classList.add("dshd-chat-current");
+				if (matches.length === 0) {
+					count.textContent = "no matches";
+				} else if (totalCount > matches.length) {
+					count.textContent = `${currentIndex + 1}/${matches.length}+`;
+				} else {
+					count.textContent = `${currentIndex + 1}/${matches.length}`;
+				}
+			}
+
+			/** Scan the conversation container for case-insensitive matches of
+			* `query` (text nodes only, never mutated) and overlay a mark over
+			* each. Cap the VISIBLE marks (huge chats stay fast); navigation
+			* still counts only the shown set. */
+			function measure(query) {
+				clearMarks();
+				const scope = containerEl();
+				if (!scope) {
+					count.textContent = "no conversation";
+					return;
+				}
+				const lower = query.toLowerCase();
+				if (lower === "") {
+					count.textContent = "no matches";
+					return;
+				}
+				const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+				const found = [];
+				while (walker.nextNode()) {
+					const node = walker.currentNode;
+					const full = node.nodeValue || "";
+					if (full === "") continue;
+					const lfull = full.toLowerCase();
+					let idx = lfull.indexOf(lower);
+					while (idx !== -1) {
+						found.push({ node, idx, len: query.length });
+						idx = lfull.indexOf(lower, idx + query.length);
+					}
+				}
+				if (found.length === 0) {
+					count.textContent = "no matches";
+					return;
+				}
+				totalCount = found.length;
+				const MAX_MARKS = 300;
+				const shown = found.length > MAX_MARKS ? found.slice(0, MAX_MARKS) : found;
+				for (const item of shown) {
+					let range;
+					try {
+						range = document.createRange();
+						range.setStart(item.node, item.idx);
+						range.setEnd(item.node, item.idx + item.len);
+					} catch {
+						continue;
+					}
+					const el = document.createElement("mark");
+					el.className = "dshd-chat-mark";
+					el.style.cssText =
+						"position:fixed;pointer-events:none;z-index:90000;display:none;" +
+						"background:var(--dsw-alias-state-warn-primary,#e8a13a);border-radius:2px;margin:0;padding:0";
+					document.body.appendChild(el);
+					matches.push({ range, el });
+				}
+				currentIndex = 0;
+				positionMarks();
+				updateCurrent();
+				scrollCurrentIntoView();
+			}
+
+			/** Run `query` against the current conversation container. */
+			function runSearch(query) {
+				activeQuery = query;
+				measure(query);
+			}
+
+			/** Move the current match by `delta` (wrapping), updating the count
+			* and scrolling the newly current match into the viewport. */
+			function step(delta) {
+				if (matches.length === 0) return;
+				currentIndex = (currentIndex + delta + matches.length) % matches.length;
+				updateCurrent();
+				scrollCurrentIntoView();
+			}
+
+			/** Re-measure after the SPA re-rendered (streaming), preserving the
+			* current match index as best effort. */
+			function refresh() {
+				if (!overlay.isConnected || !containerEl()) return;
+				const before = currentIndex;
+				measure(activeQuery);
+				if (matches.length > 0 && before >= 0 && before < matches.length) {
+					currentIndex = before;
+					updateCurrent();
+				}
+			}
+
+			// ── live tracking while the overlay is open ──
+			const schedule = (() => {
+				let timer = null;
+				return (fn) => {
+					if (timer !== null) clearTimeout(timer);
+					timer = setTimeout(() => {
+						timer = null;
+						fn();
+					}, 400);
+				};
+			})();
+			let repaint = null;
+			function requestRepaint() {
+				if (repaint !== null) return;
+				repaint = requestAnimationFrame(() => {
+					repaint = null;
+					positionMarks();
+				});
+			}
+			function watchScope() {
+				if (observer) observer.disconnect();
+				const scope = containerEl();
+				if (!scope) {
+					count.textContent = "no conversation";
+					return;
+				}
+				observer = new MutationObserver(() => {
+					if (activeQuery !== "") schedule(refresh);
+				});
+				observer.observe(scope, { childList: true, subtree: true, characterData: true });
+				// Scrolling moves the text under the marks; re-place them.
+				window.addEventListener("scroll", requestRepaint, true);
+				window.addEventListener("resize", requestRepaint);
+			}
+			function unwatchScope() {
+				if (observer) {
+					observer.disconnect();
+					observer = null;
+				}
+				window.removeEventListener("scroll", requestRepaint, true);
+				window.removeEventListener("resize", requestRepaint);
+			}
+
+			// ── wire up input + buttons ──
+			input.addEventListener("input", () => runSearch(input.value));
+			prevBtn.addEventListener("click", () => step(-1));
+			nextBtn.addEventListener("click", () => step(1));
+			closeBtn.addEventListener("click", close);
+
+			// ── open / close —─
+			function open() {
+				if (overlay.isConnected) {
+					input.focus();
+					input.select();
+					return;
+				}
+				document.body.appendChild(overlay);
+				watchScope();
+				input.focus();
+			}
+
+			function close() {
+				unwatchScope();
+				clearMarks();
+				activeQuery = "";
+				input.value = "";
+				if (overlay.isConnected) overlay.parentNode.removeChild(overlay);
+			}
+
+			// ── global key handling (capture, so it wins over the app) ──
+			const onKeyDown = (event) => {
+				const overlayFocused =
+					overlay.isConnected &&
+					(event.target === overlay || overlay.contains(event.target));
+				// Cmd/Ctrl+F → open chat search. The native webview has no
+				// find bar, so this hijacks the shortcut even inside inputs:
+				// the only place Ctrl+F is let through is our own overlay
+				// (where it selects the search box's content).
+				if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+					if (overlayFocused) return;
+					event.preventDefault();
+					event.stopPropagation();
+					open();
+					return;
+				}
+				if (!overlay.isConnected) return;
+				// Keys that matter only while the overlay is open.
+				if (event.key === "Escape") {
+					event.preventDefault();
+					event.stopPropagation();
+					close();
+					return;
+				}
+				if (event.key === "Enter") {
+					event.preventDefault();
+					event.stopPropagation();
+					step(event.shiftKey ? -1 : 1);
+					return;
+				}
+				if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+					// Only when focus is our input; arrows elsewhere belong to
+					// the chat scroll.
+					if (overlayFocused) {
+						event.preventDefault();
+						event.stopPropagation();
+						step(event.key === "ArrowUp" ? -1 : 1);
+					}
+				}
+			};
+			document.addEventListener("keydown", onKeyDown, true);
+		}
+
 		/** Keep the native window title in lockstep with the chat open in the
 		* UI right now. The sessions service's list snapshot carries the
 		* current session — the same fact source the app shell uses for the
@@ -3038,11 +3435,18 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			// Self-heal watchdog (native only): reloads the webview if the
 			// panel dies silently while the store says it is open.
 			if (hasTauri() && typeof document !== "undefined") installPanelWatchdog();
+			// External links open in the system browser instead of a dead
+			// `target="_blank"` (native only).
+			if (hasTauri() && typeof document !== "undefined") installExternalLinks();
+			// Ctrl/Cmd+F quick search over the visible chat (native only).
+			if (hasTauri() && typeof document !== "undefined") installChatSearch();
 
-			// Native folder integration: dropping a directory onto the window
-			// opens it as a workspace. Files are left to the webview, which
-			// handles attachments. The tauri core emits this event to the
-			// webview on every drop; directory-ness is checked natively.
+			// Native file/folder integration: dropping a directory onto the
+			// window opens it as a workspace; dropping image files attaches
+			// them to the active composer (falling back to an inline path when
+			// no composer or faithful read is available); any other file lands
+			// as a path in the composer draft. The tauri core emits this event
+			// to the webview on every drop; directory-ness is checked natively.
 			if (hasTauri()) {
 				window.__TAURI__.event
 					.listen("tauri://drag-drop", (event) => {
@@ -3053,9 +3457,35 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 							window.__TAURI__.core
 								.invoke("desktop_is_directory", { path })
 								.then((isDirectory) => {
-									if (isDirectory === true) openWorkspace(ctx, path);
+									if (isDirectory === true) {
+										openWorkspace(ctx, path);
+										return;
+									}
+									const name = baseName(path);
+									if (isImageName(name)) {
+										attachImageToComposer(ctx.sessions, ctx.conversation, path, name)
+											.then((attached) => {
+												if (attached !== true) insertPathIntoComposer(ctx.sessions, path);
+											})
+											.catch((error) => {
+												console.error(`dsh-desktop: cannot attach dropped image ${path}:`, error);
+												try {
+													insertPathIntoComposer(ctx.sessions, path);
+												} catch (inner) {
+													console.error(`dsh-desktop: cannot insert dropped path ${path}:`, inner);
+												}
+											});
+									} else {
+										try {
+											insertPathIntoComposer(ctx.sessions, path);
+										} catch (error) {
+											console.error(`dsh-desktop: cannot insert dropped path ${path}:`, error);
+										}
+									}
 								})
-								.catch(() => {});
+								.catch((error) => {
+									console.error(`dsh-desktop: cannot inspect dropped path ${path}:`, error);
+								});
 						}
 					})
 					.catch(() => {});

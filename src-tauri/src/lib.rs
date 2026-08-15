@@ -38,6 +38,8 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use url::Url;
 
+use crate::tray::{AgentInfo, FinishedInfo};
+
 /// The process exit code the profile plugin reads (0 = done, 11 = restart).
 /// Set before `app.exit(code)`; the window-mode run returns it after the
 /// event loop ends.
@@ -57,6 +59,17 @@ pub struct AppState {
 	pub quitting: AtomicBool,
 	/// App config directory (log file lives here).
 	pub config_dir: Mutex<String>,
+	/// Live running-agents snapshot, pushed by the harness. The tray renders
+	/// each as an entry with a log tail and a Stop action.
+	pub agents: Mutex<Vec<AgentInfo>>,
+	/// Capped log tail per agent (last 40 lines), fed by `get-log` replies.
+	pub agent_logs: Mutex<std::collections::HashMap<String, Vec<String>>>,
+	/// Agents that finished, newest-first, capped at 10; drives the tray badge.
+	pub finished_agents: Mutex<Vec<FinishedInfo>>,
+	/// The pristine tray icon (before any badge), so the badge can be cleared.
+	pub tray_icon_original: Mutex<Option<tauri::image::Image<'static>>>,
+	/// Serializes the control writes to stdout (the `dshdctl:` protocol).
+	pub control_out: Mutex<()>,
 }
 
 impl Default for AppState {
@@ -68,8 +81,21 @@ impl Default for AppState {
 			check_error: Mutex::new(None),
 			quitting: AtomicBool::new(false),
 			config_dir: Mutex::new(String::new()),
+			agents: Mutex::new(Vec::new()),
+			agent_logs: Mutex::new(std::collections::HashMap::new()),
+			finished_agents: Mutex::new(Vec::new()),
+			tray_icon_original: Mutex::new(None),
+			control_out: Mutex::new(()),
 		}
 	}
+}
+
+/// Current wall-clock time as Unix epoch milliseconds (for `FinishedInfo`).
+fn now_ms() -> u64 {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_millis() as u64)
+		.unwrap_or(0)
 }
 
 /// Parse the served URL from argv (`dsh-desktop-shell <url>`) and open the
@@ -356,6 +382,58 @@ fn run_window(raw: String) -> i32 {
 								// The custom title bar renders its own caption; mirror
 								// the native title into the webview.
 								let _ = handle.emit(update::TITLE_EVENT, title);
+							}
+							Some("agents") => {
+								// Replace the whole running list with the pushed
+								// snapshot, then let the tray refresh its menu
+								// (rebuild skips the work when nothing changed).
+								let mut agents = Vec::new();
+								if let Some(items) = message.get("agents").and_then(|v| v.as_array()) {
+									for item in items {
+										let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+										let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+										let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+										agents.push(AgentInfo { id, title, status });
+									}
+								}
+								*handle.state::<AppState>().agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = agents;
+								crate::tray::rebuild(&handle);
+							}
+							Some("agent-finished") => {
+								// A running agent just went idle: remember it
+								// (newest first, capped), badge the icon, rebuild.
+								let state = handle.state::<AppState>();
+								let id = message.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+								let title = message.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+								let time_ms = now_ms();
+								{
+									let mut finished = state.finished_agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+									finished.insert(0, FinishedInfo { id: id.clone(), title, time_ms });
+									finished.truncate(10);
+								}
+								drop(state);
+								crate::log::info(&handle, &format!("tray: badge: agent {id} finished"));
+								crate::tray::set_badge(&handle);
+								crate::tray::rebuild(&handle);
+							}
+							Some("agent-log") => {
+								// The harness replies to a get-log request with
+								// the agent's tail; keep at most 40 lines/entry.
+								let state = handle.state::<AppState>();
+								let id = message.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+								let lines: Vec<String> = message
+									.get("lines")
+									.and_then(|v| v.as_array())
+									.map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+									.unwrap_or_default();
+								{
+									let mut logs = state.agent_logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+									let mut capped = lines;
+									capped.truncate(crate::tray::LOG_CAP);
+									logs.insert(id, capped);
+								}
+								drop(state);
+								crate::tray::rebuild(&handle);
 							}
 							_ => {}
 						}
