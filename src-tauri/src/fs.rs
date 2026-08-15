@@ -182,7 +182,7 @@ pub fn desktop_create_dir(path: String) -> Result<(), String> {
 /// Rename a file or directory inside its own parent (a same-dir move).
 #[tauri::command]
 pub fn desktop_rename(path: String, new_name: String) -> Result<(), String> {
-	if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') {
+	if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains('/') || new_name.contains('\\') {
 		return Err("invalid name".into());
 	}
 	let source = std::path::PathBuf::from(&path);
