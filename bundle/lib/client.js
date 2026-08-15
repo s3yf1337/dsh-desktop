@@ -868,11 +868,15 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					}
 					return true;
 				} catch (caught) {
+					if (seq !== loadSeqRef.current) return false;
 					setError(errText(caught));
 					setEntries(null);
 					return false;
 				} finally {
-					setBusy(false);
+					// Only the current load clears busy — a stale one must leave
+					// it set so the next (fresher) call drops it, and the
+					// refresh tick stays suppressed until navigation completes.
+					if (seq === loadSeqRef.current) setBusy(false);
 				}
 			}, []);
 
