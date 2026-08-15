@@ -93,7 +93,6 @@ fn is_image(name: &str) -> Option<&'static str> {
 		Some("gif") => "image/gif",
 		Some("webp") => "image/webp",
 		Some("bmp") => "image/bmp",
-		Some("svg") => "image/svg+xml",
 		Some("ico") => "image/x-icon",
 		Some("avif") => "image/avif",
 		_ => return None,
