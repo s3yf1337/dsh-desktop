@@ -153,6 +153,17 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 #dshd-explorer-resize:hover:after,#dshd-explorer-resize.dragging:after{opacity:1}
 #dshd-explorer-resize:hover:after,#dshd-explorer-resize.dragging:after{background:var(--dsw-alias-button-floating-hover);border-color:var(--dsw-alias-border-l3)}
 body.dshd-resizing{user-select:none;cursor:col-resize}
+/* Explorer panel: the app sidebar's visual language (fill, rows, round icon
+   buttons) + its open animations: content fades in (wide-in) while the
+   panel width grows with the same transition tokens as the grid columns. */
+@keyframes dshd-explorer-in{0%{opacity:0}}
+.dshd-explorer-panel{animation:dshd-explorer-in .2s var(--ds-ease-in-out)}
+.dshd-explorer-panel .dshd-tab:hover,.dshd-explorer-panel .dshd-round:hover,.dshd-explorer-panel .dshd-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dshd-explorer-panel .dshd-scroll{scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2) transparent}
+.dshd-explorer-panel ::-webkit-scrollbar{width:var(--dsh-scrollbar-width,8px)}
+.dshd-explorer-panel ::-webkit-scrollbar-thumb{background:var(--dsh-scrollbar-thumb);border-radius:4px}
+.dshd-explorer-panel ::-webkit-scrollbar-thumb:hover{background:var(--dsh-scrollbar-thumb-hover)}
+@media (prefers-reduced-motion:reduce){.dshd-explorer-panel{animation:none}}
 `;
 
 		function svgIcon(path, size = 12) {
@@ -346,7 +357,6 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 		function ExplorerPanel({ workspaces, close }) {
 			const [open, setOpen] = useState(explorerStore.open);
 			const [tab, setTab] = useState(explorerStore.tab);
-			const [width, setWidth] = useState(explorerStore.width);
 			const [cwd, setCwd] = useState(null);
 			const [entries, setEntries] = useState(null);
 			const [error, setError] = useState(null);
@@ -361,22 +371,28 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			useEffect(() => explorerStore.subscribe(() => {
 				setOpen(explorerStore.open);
 				setTab(explorerStore.tab);
-				setWidth(explorerStore.width);
 			}), []);
 
-			// Dock/un-dock: reserve the panel width on the frame (the frame
-			// animates padding-right with the app's own transition tokens, so
-			// the main content slides exactly like the sidebar/details panels).
+			// Dock/un-dock exactly like the app's own columns: the panel's
+			// width and the frame's reserved space both transition with the
+			// app's tokens (--ds-transition-duration-slow / --ds-ease-in-out),
+			// and the content fades in like the sidebar's wide-in keyframes.
 			useEffect(() => {
+				const panel = panelRef.current;
 				if (open) {
 					setRendered(true);
 					syncExplorerLayout(explorerStore.width);
-					return;
+					if (panel) panel.style.width = "0px";
+					const raf = requestAnimationFrame(() => {
+						if (panelRef.current) panelRef.current.style.width = `${explorerStore.width}px`;
+					});
+					return () => cancelAnimationFrame(raf);
 				}
+				if (panel) panel.style.width = "0px";
 				syncExplorerLayout(0);
-				const timer = setTimeout(() => setRendered(false), 320);
+				const timer = setTimeout(() => setRendered(false), 360);
 				return () => clearTimeout(timer);
-			}, [open, width]);
+			}, [open]);
 
 			// Resize: drag the handle → live-update the panel width + frame
 			// padding during the drag, commit to the store on release.
@@ -389,6 +405,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				let lastWidth = startWidth;
 				handle.classList.add("dragging");
 				document.body.classList.add("dshd-resizing");
+				if (panelRef.current) panelRef.current.style.transition = "none";
 				const onMove = (moveEvent) => {
 					const next = Math.min(
 						EXPLORER_MAX_WIDTH,
@@ -404,8 +421,11 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					handle.removeEventListener("pointermove", onMove);
 					handle.removeEventListener("pointerup", onUp);
 					handle.removeEventListener("pointercancel", onUp);
+					if (panelRef.current) {
+						panelRef.current.style.transition =
+							"width var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
+					}
 					explorerStore.setWidth(lastWidth);
-					setWidth(lastWidth);
 				};
 				handle.setPointerCapture(event.pointerId);
 				handle.addEventListener("pointermove", onMove);
@@ -489,114 +509,125 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 
 			if (!rendered) return null;
 
+			// The panel borrows the app sidebar's visual language: same fill
+			// (--dsw-specific-sidebar-fill), same border tone, same padding,
+			// font size and scrollbars. Its width is animated by the dock
+			// effect (0 → target on open, target → 0 on close).
 			const style = {
 				position: "absolute",
 				top: 0,
 				right: 0,
 				bottom: 0,
-				width,
-				background: "var(--dsw-alias-bg-layer-1)",
-				borderLeft: "1px solid var(--dsw-alias-border-l2)",
-				boxShadow: "var(--dsw-shadow-lv3)",
+				width: 0,
+				background: "var(--dsw-specific-sidebar-fill)",
+				borderLeft: "1px solid var(--dsw-alias-border-l1)",
+				overflow: "hidden",
 				display: "flex",
 				flexDirection: "column",
+				boxSizing: "border-box",
+				padding: "6px 12px",
 				color: "var(--dsw-alias-label-primary)",
-				fontFamily: "var(--dsw-font-family)"
+				fontFamily: "var(--dsw-font-family)",
+				fontSize: 14,
+				transition: "width var(--ds-transition-duration-slow) var(--ds-ease-in-out)",
+				willChange: "width",
+				"--dsh-scrollbar-thumb": "var(--dsw-alias-scrollbar-bg-l2)",
+				"--dsh-scrollbar-thumb-hover": "var(--dsw-alias-scrollbar-hover-l2)"
+			};
+			// 28px round icon button (the sidebar's iconButton).
+			const roundButton = {
+				width: 28,
+				height: 28,
+				border: "none",
+				background: "transparent",
+				borderRadius: "50%",
+				cursor: "pointer",
+				color: "var(--dsw-alias-label-secondary)",
+				display: "grid",
+				placeItems: "center",
+				flex: "none",
+				padding: 0
+			};
+			const roundButtonHover = {
+				...roundButton,
+				background: "var(--dsw-alias-interactive-bg-hover)"
 			};
 			const headerStyle = {
 				display: "flex",
 				alignItems: "center",
 				justifyContent: "space-between",
-				padding: "10px 12px 6px",
+				gap: 8,
+				padding: "2px 0 8px",
 				flex: "none"
 			};
 			const tabsStyle = {
 				display: "flex",
-				gap: 4,
-				background: "var(--dsw-alias-interactive-bg-hover)",
-				borderRadius: 8,
-				padding: 2
+				gap: 2,
+				flex: 1,
+				minWidth: 0
 			};
 			const tabStyle = (active) => ({
-				flex: 1,
 				border: "none",
-				background: active ? "var(--dsw-alias-bg-layer-1)" : "transparent",
-				color: active ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-tertiary)",
-				borderRadius: 6,
+				background: active ? "var(--dsw-alias-interactive-bg-hover)" : "transparent",
+				color: active ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-secondary)",
+				borderRadius: 8,
 				padding: "4px 10px",
-				fontSize: 12,
+				height: 30,
+				fontSize: 13,
 				fontWeight: 500,
 				cursor: "pointer",
 				fontFamily: "inherit",
 				display: "flex",
 				alignItems: "center",
 				gap: 6,
-				boxShadow: active ? "var(--dsw-shadow-lv1)" : "none"
+				flex: 1,
+				justifyContent: "center",
+				minWidth: 0
+			});
+			const pathButton = (disabled) => ({
+				...roundButton,
+				color: disabled ? "var(--dsw-alias-label-tertiary)" : "var(--dsw-alias-label-secondary)",
+				opacity: disabled ? 0.5 : 1,
+				cursor: disabled ? "default" : "pointer"
 			});
 
-			return h("div", { ref: panelRef, style, "data-dshd-explorer": true },
+			return h("div", { ref: panelRef, className: "dshd-explorer-panel", style, "data-dshd-explorer": true },
 				// Resize handle (docked columns have one, like the app's own).
 				h("div", { id: "dshd-explorer-resize", onPointerDown: (event) => startResize(event) }),
 				h("div", { style: headerStyle },
 					h("div", { style: tabsStyle },
-						h("button", { type: "button", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
+						h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
 							h(IconFolderOpenOutline16, {}), "Files"),
-						h("button", { type: "button", style: tabStyle(tab === "preview"), onClick: () => explorerStore.setTab("preview") },
+						h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "preview"), onClick: () => explorerStore.setTab("preview") },
 							h(IconCodeOutline16, {}), "Preview")
 					),
 					h("button", {
 						type: "button",
+						className: "dshd-round",
 						title: "Hide panel",
-						onClick: () => explorerStore.setOpen(false),
-						style: {
-							border: "none",
-							background: "transparent",
-							cursor: "pointer",
-							color: "var(--dsw-alias-label-tertiary)",
-							padding: 4,
-							display: "grid",
-							placeItems: "center",
-							borderRadius: 6
-						}
+						style: roundButton,
+						onClick: () => explorerStore.setOpen(false)
 					}, h(IconCloseOutline16, {}))
 				),
 
 				tab === "files"
 					? h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
-							h("div", { style: { display: "flex", alignItems: "center", gap: 4, padding: "0 12px 8px", flex: "none" } },
+							h("div", { style: { display: "flex", alignItems: "center", gap: 2, padding: "0 0 8px", flex: "none" } },
 								h("button", {
 									type: "button",
+									className: "dshd-round",
 									title: "Up",
 									disabled: !cwd || busy,
 									onClick: () => goUp(),
-									style: {
-										border: "none",
-										background: "var(--dsw-alias-interactive-bg-hover)",
-										borderRadius: 6,
-										padding: "4px 6px",
-										cursor: "pointer",
-										color: "var(--dsw-alias-label-secondary)",
-										display: "grid",
-										placeItems: "center",
-										flex: "none"
-									}
+									style: pathButton(!cwd || busy)
 								}, h(IconChevronLeftOutline14, {})),
 								h("button", {
 									type: "button",
+									className: "dshd-round",
 									title: "Refresh",
 									disabled: !cwd || busy,
 									onClick: () => cwd && loadDir(cwd),
-									style: {
-										border: "none",
-										background: "var(--dsw-alias-interactive-bg-hover)",
-										borderRadius: 6,
-										padding: "4px 6px",
-										cursor: "pointer",
-										color: "var(--dsw-alias-label-secondary)",
-										display: "grid",
-										placeItems: "center",
-										flex: "none"
-									}
+									style: pathButton(!cwd || busy)
 								}, h(IconRefreshOutline14, {})),
 								h("div", {
 									title: cwd || "",
@@ -608,21 +639,23 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 										whiteSpace: "nowrap",
 										overflow: "hidden",
 										textOverflow: "ellipsis",
-										fontFamily: "var(--ds-font-family-code, monospace)"
+										fontFamily: "var(--ds-font-family-code, monospace)",
+										padding: "0 4px"
 									}
 								}, cwd || "…")
 							),
 							error
-								? h("div", { style: { padding: "0 12px 8px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, error)
+								? h("div", { style: { padding: "0 4px 8px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, error)
 								: null,
 							!entries
-								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } },
+								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: "0 8px", textAlign: "center" } },
 										busy ? "Loading…" : (error ? "Nothing to show" : "No workspace yet — pick a folder in Settings → dsh-desktop."))
-								: h("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 6px 12px" } },
+								: h("div", { className: "dshd-scroll", style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 0 12px" } },
 										entries.map((entry) =>
 											h("button", {
 												key: entry.path,
 												type: "button",
+												className: "dshd-row",
 												title: entry.path,
 												onClick: () => (entry.is_dir ? loadDir(entry.path) : openFile(entry.path, entry.name)),
 												style: {
@@ -630,27 +663,23 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 													alignItems: "center",
 													gap: 8,
 													width: "100%",
+													minHeight: 30,
 													border: "none",
 													background: "transparent",
-													borderRadius: 6,
-													padding: "5px 8px",
+													borderRadius: 8,
+													padding: "2px 8px",
 													cursor: "pointer",
 													font: "inherit",
-													color: "var(--dsw-alias-label-primary)"
-												},
-												onMouseEnter: (event) => {
-													event.currentTarget.style.background = "var(--dsw-alias-interactive-bg-hover)";
-												},
-												onMouseLeave: (event) => {
-													event.currentTarget.style.background = "transparent";
+													color: "var(--dsw-alias-label-primary)",
+													boxSizing: "border-box"
 												}
 											},
-												h("span", { style: { color: entry.is_dir ? "var(--dsw-alias-state-business-primary)" : "var(--dsw-alias-label-secondary)", display: "grid", placeItems: "center", flex: "none" } },
+												h("span", { style: { color: entry.is_dir ? "var(--dsw-alias-label-secondary)" : "var(--dsw-alias-label-tertiary)", display: "grid", placeItems: "center", flex: "none" } },
 													entry.is_dir ? h(IconFolderOpen16, {}) : h(IconDataOutline16, {})),
 												h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 } }, entry.name),
 												entry.is_dir
 													? null
-													: h("span", { style: { flex: "none", fontSize: 11, color: "var(--dsw-alias-label-tertiary)", fontVariantNumeric: "tabular-nums" } },
+													: h("span", { style: { flex: "none", fontSize: 11, color: "var(--dsw-alias-label-tertiary)", fontVariantNumeric: "tabular-nums", paddingLeft: 8 } },
 															formatTime(entry.modified_ms), " ", formatSize(entry.size))
 											)
 										)
@@ -661,22 +690,13 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: 24, textAlign: "center" } },
 										"Select a file in the Files tab to preview it here.")
 								: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
-										h("div", { style: { display: "flex", alignItems: "center", gap: 6, padding: "0 12px 8px", flex: "none" } },
+										h("div", { style: { display: "flex", alignItems: "center", gap: 4, padding: "0 0 8px", flex: "none" } },
 											h("button", {
 												type: "button",
+												className: "dshd-round",
 												title: "Back to files",
 												onClick: () => explorerStore.setTab("files"),
-												style: {
-													border: "none",
-													background: "var(--dsw-alias-interactive-bg-hover)",
-													borderRadius: 6,
-													padding: "4px 6px",
-													cursor: "pointer",
-													color: "var(--dsw-alias-label-secondary)",
-													display: "grid",
-													placeItems: "center",
-													flex: "none"
-												}
+												style: roundButton
 											}, h(IconChevronLeftOutline14, {})),
 											h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 500 } }, preview.name || "")
 										),
