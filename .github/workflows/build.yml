@@ -15,7 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            bin: dsh-desktop-shell-linux-x86_64
+          - os: macos-latest
+            bin: dsh-desktop-shell-macos-aarch64
+          - os: windows-latest
+            bin: dsh-desktop-shell-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,29 +42,31 @@ jobs:
             libgtk-3-dev \
             patchelf
 
-      - name: Install tauri-cli
-        run: cargo install tauri-cli --locked
-
-      - name: Build (cargo tauri build)
+      - name: Build client (cargo build --release)
         working-directory: src-tauri
-        run: cargo tauri build
+        run: cargo build --release
 
-      - name: Upload bundle artifacts
+      - name: Name the client binary per OS
+        shell: bash
+        run: |
+          cd src-tauri/target/release
+          if [ -f dsh-desktop-shell.exe ]; then
+            mv dsh-desktop-shell.exe "${{ matrix.bin }}"
+          else
+            mv dsh-desktop-shell "${{ matrix.bin }}"
+          fi
+
+      - name: Upload client binary
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ matrix.os }}
+          name: binary-${{ matrix.os }}
           if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/dsh-desktop-shell
-            src-tauri/target/release/dsh-desktop-shell.exe
+          path: src-tauri/target/release/${{ matrix.bin }}
 
   # Publish exactly one release from one job: the build matrix only uploads
-  # artifacts; this job downloads them all and creates the GitHub release.
+  # binaries; this job downloads them, packs the plugin bundle, and creates
+  # the GitHub release (dsh-desktop is a harness profile/plugin — the client
+  # binary + the bundle are the artifacts, not OS installers).
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
@@ -66,14 +74,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack the plugin bundle
+        run: tar -czf dsh-desktop-shell-bundle-${GITHUB_REF_NAME}.tgz bundle/
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: bundle-*
+          pattern: binary-*
           merge-multiple: true
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            dsh-desktop-shell-bundle-*.tgz
           generate_release_notes: true

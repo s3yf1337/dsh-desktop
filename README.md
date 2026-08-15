@@ -73,12 +73,19 @@ dsh-desktop tab drives it directly through the `desktop_*` commands.
 
 ## Install
 
-### Release packages (CI-built)
+### Release artifacts (CI-built)
 
-Every `v*` tag builds installers on all three platforms via GitHub Actions and
-publishes them as a release: `.deb` / `.AppImage` (Linux), `.dmg` (macOS),
-`.msi` / `.exe` (Windows). The client binary from a release can be dropped in
-with `./install.sh --no-build`, or the bundle used as-is.
+Every `v*` tag builds the client binary on all three platforms via GitHub
+Actions and publishes them as a release — plus a tarball of the plugin
+bundle. dsh-desktop is a *profile/plugin* for the DeepSeek Harness, so the
+artifacts are the pieces `install.sh` consumes, not standalone OS installers:
+
+- `dsh-desktop-shell-linux-x86_64`, `dsh-desktop-shell-macos-aarch64`,
+  `dsh-desktop-shell-windows-x86_64.exe` — the native render client.
+- `dsh-desktop-shell-bundle-<tag>.tgz` — the `bundle/` plugin package.
+
+Drop the right binary in place (or let `install.sh` copy it with
+`--no-build`) and run the profile as usual.
 
 ### From source (one command)
 
