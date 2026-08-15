@@ -1360,11 +1360,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			};
 
 			const crumbs = useMemo(() => {
+				const norm = (p) => p.replace(/\\/g, "/");
 				const segs = pathSegments(cwd);
 				if (segs.length === 0) return [];
 				if (currentWorkspacePath) {
 					const rootSegs = pathSegments(currentWorkspacePath);
-					if (rootSegs.length > 0 && (cwd === currentWorkspacePath || cwd.startsWith(currentWorkspacePath + "/"))) {
+					if (rootSegs.length > 0 && (norm(cwd) === norm(currentWorkspacePath) || norm(cwd).startsWith(norm(currentWorkspacePath) + "/"))) {
 						return [
 							{ name: currentWorkspaceTitle, path: currentWorkspacePath },
 							...segs.slice(rootSegs.length)
