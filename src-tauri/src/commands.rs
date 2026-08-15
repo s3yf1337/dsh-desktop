@@ -10,10 +10,10 @@ use crate::AppState;
 /// Snapshot the whole desktop state (settings + update status).
 pub fn snapshot(app: &AppHandle) -> DesktopState {
 	let state = app.state::<AppState>();
-	let settings = state.settings.lock().unwrap().clone();
-	let update = state.update.lock().unwrap().clone();
-	let last_update_check = state.last_check.lock().unwrap().clone();
-	let update_check_error = state.check_error.lock().unwrap().clone();
+	let settings = state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+	let update = state.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+	let last_update_check = state.last_check.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+	let update_check_error = state.check_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	DesktopState {
 		version: env!("CARGO_PKG_VERSION").to_string(),
 		settings,
@@ -35,48 +35,54 @@ pub fn desktop_get_state(app: AppHandle) -> DesktopState {
 #[tauri::command]
 pub fn desktop_set_setting(app: AppHandle, key: String, value: serde_json::Value) -> Result<DesktopState, String> {
 	let state = app.state::<AppState>();
-	let mut settings = state.settings.lock().unwrap();
-	let changed = match key.as_str() {
-		"tray" => match value.as_bool() {
-			Some(b) => {
-				let changed = settings.tray != b;
-				settings.tray = b;
-				changed
-			}
-			None => return Err("tray expects a boolean".into()),
-		},
-		"notifications" => match value.as_bool() {
-			Some(b) => {
-				let changed = settings.notifications != b;
-				settings.notifications = b;
-				changed
-			}
-			None => return Err("notifications expects a boolean".into()),
-		},
-		"auto_update_check" => match value.as_bool() {
-			Some(b) => {
-				let changed = settings.auto_update_check != b;
-				settings.auto_update_check = b;
-				changed
-			}
-			None => return Err("auto_update_check expects a boolean".into()),
-		},
-		"update_interval_hours" => match value.as_u64() {
-			Some(n) => {
-				let changed = settings.update_interval_hours != n;
-				settings.update_interval_hours = n;
-				changed
-			}
-			None => return Err("update_interval_hours expects a number".into()),
-		},
-		_ => return Err(format!("unknown setting: {key}")),
+	// Mutate and read what we need under the lock, then drop it before the
+	// disk write so a slow save never blocks other readers on the main thread.
+	let (changed, settings_to_save, notifications_enabled, tray_enabled) = {
+		let mut settings = state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let changed = match key.as_str() {
+			"tray" => match value.as_bool() {
+				Some(b) => {
+					let changed = settings.tray != b;
+					settings.tray = b;
+					changed
+				}
+				None => return Err("tray expects a boolean".into()),
+			},
+			"notifications" => match value.as_bool() {
+				Some(b) => {
+					let changed = settings.notifications != b;
+					settings.notifications = b;
+					changed
+				}
+				None => return Err("notifications expects a boolean".into()),
+			},
+			"auto_update_check" => match value.as_bool() {
+				Some(b) => {
+					let changed = settings.auto_update_check != b;
+					settings.auto_update_check = b;
+					changed
+				}
+				None => return Err("auto_update_check expects a boolean".into()),
+			},
+			"update_interval_hours" => match value.as_u64() {
+				Some(n) => {
+					// Clamp to [1, 720] hours (up to 30 days) so `interval * 3600`
+					// in the update loop cannot overflow.
+					let n = n.clamp(1, 720);
+					let changed = settings.update_interval_hours != n;
+					settings.update_interval_hours = n;
+					changed
+				}
+				None => return Err("update_interval_hours expects a number".into()),
+			},
+			_ => return Err(format!("unknown setting: {key}")),
+		};
+		let settings_to_save = settings.clone();
+		(changed, settings_to_save, settings.notifications, settings.tray)
 	};
-	let notifications_enabled = settings.notifications;
-	let tray_enabled = settings.tray;
-	let config_dir = app.path().app_config_dir().unwrap_or_default();
-	crate::settings::save(&config_dir, &settings);
-	drop(settings);
 	drop(state);
+	let config_dir = app.path().app_config_dir().unwrap_or_default();
+	crate::settings::save(&config_dir, &settings_to_save);
 	if changed {
 		if key == "notifications" && notifications_enabled {
 			use tauri_plugin_notification::NotificationExt;
@@ -113,7 +119,7 @@ pub fn desktop_open_release(app: AppHandle) -> Result<(), String> {
 	let url = state
 		.update
 		.lock()
-		.unwrap()
+		.unwrap_or_else(|poisoned| poisoned.into_inner())
 		.as_ref()
 		.map(|info| info.url.clone())
 		.unwrap_or_else(|| crate::updater::RELEASES_URL.to_string());
@@ -171,20 +177,6 @@ pub fn desktop_reset_geometry(app: AppHandle) -> Result<(), String> {
 pub fn desktop_test_notification(app: AppHandle) -> Result<(), String> {
 	crate::update::notify(&app, "dsh-desktop", "Notifications work!");
 	Ok(())
-}
-
-/// Open the native folder picker and return the chosen directory (None when
-/// the user cancels). Backs the "Choose workspace folder" row in the settings
-/// tab and the drop-a-folder flow.
-#[tauri::command]
-pub async fn desktop_pick_directory(app: AppHandle) -> Result<Option<String>, String> {
-	use tauri_plugin_dialog::DialogExt;
-	let (sender, receiver) = tokio::sync::oneshot::channel();
-	app.dialog().file().pick_folder(move |picked| {
-		let _ = sender.send(picked.map(|path| path.to_string()));
-	});
-	let picked = receiver.await.map_err(|error| format!("dialog channel: {error}"))?;
-	Ok(picked)
 }
 
 /// Whether a dropped path is a directory (drag & drop decides between opening
