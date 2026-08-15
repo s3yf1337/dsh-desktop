@@ -375,6 +375,42 @@ fn run_window(raw: String) -> i32 {
 				let _ = win.navigate(url.clone());
 				let _ = win.show();
 				let _ = win.set_focus();
+				// window-state restores geometry verbatim, so a position
+				// recorded on a monitor that is no longer connected leaves the
+				// window off-screen and invisible. If it overlaps no connected
+				// monitor, recenter it. Errors (e.g. on Wayland/X11) just skip
+				// the clamp — never break startup over geometry.
+				let on_screen = win
+					.inner_position()
+					.or_else(|_| win.outer_position())
+					.and_then(|pos| {
+						let size = win.inner_size()?;
+						Ok((pos, size))
+					})
+					.map(|(pos, size)| {
+						let x0 = pos.x;
+						let y0 = pos.y;
+						let x1 = pos.x + size.width as i32;
+						let y1 = pos.y + size.height as i32;
+						app_handle
+							.available_monitors()
+							.map(|monitors| {
+								monitors.iter().any(|m| {
+									let p = m.position();
+									let s = m.size();
+									let mx0 = p.x;
+									let my0 = p.y;
+									let mx1 = p.x + s.width as i32;
+									let my1 = p.y + s.height as i32;
+									x0 < mx1 && x1 > mx0 && y0 < my1 && y1 > my0
+								})
+							})
+							.unwrap_or(false)
+					})
+					.unwrap_or(false);
+				if !on_screen {
+					let _ = win.center();
+				}
 			}
 		}
 		// Close-to-tray: hide instead of exiting while the tray is enabled and
