@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-hexdump"
+description = "Enables the desktop_hexdump command without any pre-configured scope."
+commands.allow = ["desktop_hexdump"]
+
+[[permission]]
+identifier = "deny-desktop-hexdump"
+description = "Denies the desktop_hexdump command without any pre-configured scope."
+commands.deny = ["desktop_hexdump"]

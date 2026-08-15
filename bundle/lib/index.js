@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -36,6 +37,170 @@ const Config = z.object({
 
 /** The loopback host every local surface binds to by default. */
 const LOOPBACK_HOST = "127.0.0.1";
+
+// ── local-file serving for the preview panel ──────────────────────────────
+//
+// The explorer's Preview tab renders markdown with the app's own renderer and
+// shows local .html pages in a sandboxed iframe. Both need the browser to
+// load LOCAL files over HTTP: the app origin's browser cannot read the disk,
+// and data: URIs cannot carry relative assets. This plugin registers a
+// loopback-only route on the harness web server that serves one file per
+// request, addressed by its absolute path:
+//
+//   http://127.0.0.1:<port>/dshd-file/<encodeURIComponent(absPath)>
+//
+// The route is the preview's only bridge to the filesystem, so it is fenced
+// hard: loopback clients only (the WebView always connects from loopback, so
+// a harness bound to a LAN interface never exposes local files to the LAN),
+// GET/HEAD only, size caps, and no directory listings. text/html responses
+// get a tiny bridge script so pages previewed in the sandboxed iframe can
+// ask the panel to open external links in the system browser (a sandboxed
+// iframe cannot reach its parent any other way).
+
+/** URL prefix of the local-file preview route. */
+const DSHD_FILE_PREFIX = "/dshd-file";
+
+/** One file per request, capped so a mistaken preview cannot OOM the server. */
+const DSHD_FILE_CAP = 32 << 20;
+
+/** MIME by extension; anything unknown is served as an opaque download. */
+const DSHD_FILE_MIME = {
+	".html": "text/html; charset=utf-8",
+	".htm": "text/html; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".js": "text/javascript; charset=utf-8",
+	".mjs": "text/javascript; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".md": "text/plain; charset=utf-8",
+	".markdown": "text/plain; charset=utf-8",
+	".txt": "text/plain; charset=utf-8",
+	".xml": "application/xml; charset=utf-8",
+	".svg": "image/svg+xml",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".bmp": "image/bmp",
+	".ico": "image/x-icon",
+	".avif": "image/avif",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+	".ttf": "font/ttf",
+	".otf": "font/otf",
+	".eot": "application/vnd.ms-fontobject",
+	".mp3": "audio/mpeg",
+	".ogg": "audio/ogg",
+	".wav": "audio/wav",
+	".mp4": "video/mp4",
+	".webm": "video/webm",
+	".pdf": "application/pdf"
+};
+
+/**
+ * Bridge injected into every text/html response. The preview iframe is
+ * sandboxed (opaque origin), so the page cannot touch its parent: the bridge
+ * is the page's only voice. It reports the title (the panel shows it instead
+ * of the file name) and forwards external-link clicks (http/https/mailto or
+ * target=_blank) to the parent, which opens them in the system browser.
+ * Relative links are left alone — they navigate the iframe itself, which is
+ * exactly the browser behavior a local page expects.
+ */
+const DSHD_FILE_BRIDGE = `<script>(()=>{const post=(m)=>{try{parent.postMessage({source:"dshd-file",...m},"*")}catch{}};
+try{post({type:"title",title:document.title})}catch{}
+document.addEventListener("click",(e)=>{const a=e.target&&e.target.closest?e.target.closest("a[href]"):null;if(!a)return;
+const href=a.getAttribute("href")||"";const external=/^(https?:|mailto:)/i.test(href)||a.target==="_blank";
+if(external){e.preventDefault();e.stopPropagation();post({type:"open",url:a.href})}},true)})();<\/script>`;
+
+/** Loopback client addresses (IPv4, IPv6, and the v4-mapped form). */
+function isLoopback(address) {
+	return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/** MIME of `path`, falling back to the opaque binary type. */
+function mimeOf(path) {
+	const dot = path.lastIndexOf(".");
+	if (dot === -1) return "application/octet-stream";
+	return DSHD_FILE_MIME[path.slice(dot).toLowerCase()] ?? "application/octet-stream";
+}
+
+/**
+ * Serve one local file per request at `/dshd-file/<encoded absolute path>`.
+ * @param req - the node http request (the webServer service's handler contract).
+ * @param res - the node http response.
+ */
+async function serveDshdFile(req, res) {
+	if (req.method !== "GET" && req.method !== "HEAD") {
+		res.writeHead(405);
+		res.end();
+		return;
+	}
+	// Loopback fence: the WebView's requests always come from loopback; LAN
+	// clients of a harness bound to 0.0.0.0 must never reach local files.
+	if (!isLoopback(req.socket.remoteAddress)) {
+		res.writeHead(403);
+		res.end();
+		return;
+	}
+	let decoded;
+	try {
+		decoded = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
+	} catch {
+		res.writeHead(400);
+		res.end();
+		return;
+	}
+	if (!decoded.startsWith(`${DSHD_FILE_PREFIX}/`)) {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	const path = decoded.slice(DSHD_FILE_PREFIX.length + 1);
+	if (path === "" || path.includes("\0")) {
+		res.writeHead(400);
+		res.end();
+		return;
+	}
+	let meta;
+	try {
+		meta = await stat(path);
+	} catch {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	if (!meta.isFile() || meta.size > DSHD_FILE_CAP) {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	let body;
+	try {
+		body = await readFile(path);
+	} catch {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	let mime = mimeOf(path);
+	if (mime === "text/html; charset=utf-8") {
+		const bridge = Buffer.from(DSHD_FILE_BRIDGE, "utf8");
+		const index = body.indexOf(Buffer.from("</head>", "utf8"));
+		body = index === -1 ? Buffer.concat([bridge, body]) : Buffer.concat([body.subarray(0, index), bridge, body.subarray(index)]);
+	}
+	res.writeHead(200, {
+		"content-type": mime,
+		"content-length": body.length,
+		// The preview reloads with a rev query; a page edited on disk must
+		// not be shadowed by a cache.
+		"cache-control": "no-cache"
+	});
+	if (req.method === "HEAD") {
+		res.end();
+	} else {
+		res.end(body);
+	}
+}
 
 /** Resolve the Harness home exactly as the launcher does: `DSH_HOME`, else `~/.dsh`. */
 function resolveDshHome() {
@@ -96,9 +261,20 @@ function apply(ctx, config) {
 	const exit = ctx.get("appExit");
 	let child;
 
+	// The preview panel's local-file route: markdown images and local .html
+	// pages are served through the harness web server (loopback-only). The
+	// effect owns the route's lifetime — it dies with this plugin's fiber.
+	ctx.effect(() => ctx.webServer.register({
+		kind: "prefix",
+		path: DSHD_FILE_PREFIX,
+		handler: serveDshdFile
+	}), "desktop-shell: local-file preview route");
+
 	// Agent-lifecycle state for notification translation: the harness emits
 	// app-level events the desktop shell mirrors into OS notifications through
-	// the client's stdin control channel.
+	// the client's stdin control channel. The window title is NOT driven from
+	// here — it follows the chat open in the web UI (the SPA's
+	// `document.title` is mirrored into the native window by the client).
 	const titles = new Map();
 	const running = new Map();
 
@@ -142,20 +318,9 @@ function apply(ctx, config) {
 		return "The agent is asking you a question.";
 	};
 
-	// Mirror agent lifecycle into notifications + the window title. All
-	// subscriptions are app-level cordis events; listeners are disposed with
-	// the plugin.
+	// Mirror agent lifecycle into notifications. All subscriptions are
+	// app-level cordis events; listeners are disposed with the plugin.
 	const disposeListeners = [];
-	// The session whose title the window currently reflects (most recently
-	// started agent work).
-	let titleSession = null;
-	const pushWindowTitle = (id) => {
-		const title = titles.get(id);
-		writeControl({
-			event: "title",
-			title: typeof title === "string" && title !== "" ? `DeepSeek Harness — ${title}` : null
-		});
-	};
 	if (typeof ctx.on === "function") {
 		disposeListeners.push(ctx.on("agent/status", ({ agent, status }) => {
 			const id = agent?.id;
@@ -163,10 +328,7 @@ function apply(ctx, config) {
 			const wasRunning = running.get(id) ?? false;
 			const isRunning = status === "running";
 			running.set(id, isRunning);
-			if (isRunning && !wasRunning) {
-				titleSession = id;
-				pushWindowTitle(id);
-			} else if (wasRunning && !isRunning) {
+			if (wasRunning && !isRunning) {
 				const title = titles.get(id);
 				writeControl({
 					event: "notify",
@@ -175,10 +337,6 @@ function apply(ctx, config) {
 						? `"${title}" — work complete.`
 						: `Session ${id} finished its work.`
 				});
-				if (titleSession === id) {
-					titleSession = null;
-					writeControl({ event: "title", title: null });
-				}
 			}
 		}));
 		disposeListeners.push(ctx.on("agent/error", ({ agent, error }) => {
@@ -191,7 +349,6 @@ function apply(ctx, config) {
 		disposeListeners.push(ctx.on("session/event", (session, event) => {
 			if (event?.type === "session/title" && typeof event.data?.title === "string") {
 				titles.set(session?.id, event.data.title);
-				if (session?.id === titleSession) pushWindowTitle(session.id);
 			} else if (event?.type === "tool/call" && event.data?.name === "ask_user_question") {
 				writeControl({
 					event: "notify",

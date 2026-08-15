@@ -25,7 +25,8 @@ static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 pub const STATE_EVENT: &str = "desktop://state";
 /// Progress of the one-click update; payload `{ phase, received?, total? }`.
 pub const UPDATE_PROGRESS_EVENT: &str = "desktop://update-progress";
-/// The window title (session title) for the custom title bar.
+/// The window title for the custom title bar (mirrored from the active
+/// chat's title, or from a control-channel "title" fallback message).
 pub const TITLE_EVENT: &str = "desktop://title";
 
 /// Delay before the first startup check (let the window open first).

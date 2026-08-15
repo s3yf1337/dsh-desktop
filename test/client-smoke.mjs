@@ -41,7 +41,8 @@ for (const name of [
 	"IconCodeOutline16", "IconDataOutline16", "IconSearchOutline16", "IconPanelLeftOutline16",
 	"IconPlusOutline16", "IconCheckOutline14", "IconCopyOutline16", "IconTrashOutline16",
 	"IconEditOutline16", "IconChevronUpOutline14", "IconPaperclipOutline16", "IconRightUpOutline14",
-	"IconLinkOutline16", "IconSendOutline14", "IconFolderClose16"
+	"IconLinkOutline16", "IconSendOutline14", "IconFolderClose16",
+	"IconGlobeOutline16"
 ]) {
 	primitivesStub[name] = () => h("svg", { "data-icon": name });
 }
@@ -49,6 +50,9 @@ primitivesStub.Button = Primitive;
 primitivesStub.Menu = () => null;
 primitivesStub.Modal = () => null;
 primitivesStub.writeClipboard = async () => true;
+// The app's markdown renderer: a stub that just echoes the text, so the
+// preview panel renders in the smoke test without the real primitives.
+primitivesStub.MarkdownText = ({ text }) => h("div", { "data-markdown": true }, text);
 
 globalThis.localStorage = localStorageShim;
 globalThis.window = {
@@ -94,6 +98,43 @@ if (!plugin || typeof plugin.apply !== "function" || !Array.isArray(plugin.injec
 	throw new Error("client.js did not export apply/inject");
 }
 console.log("client.js loaded; inject =", JSON.stringify(plugin.inject));
+
+// ── pure preview helpers ──────────────────────────────────────────────────
+const helpers = plugin.previewHelpers;
+if (!helpers || typeof helpers.rewriteMarkdownImages !== "function") {
+	throw new Error("client.js did not export previewHelpers");
+}
+globalThis.location = { origin: "http://127.0.0.1:9999" };
+{
+	const { rewriteMarkdownImages, extractToc, resolveLocalPath, normalizeWebUrl, dshdFileUrl } = helpers;
+	const md = "/home/u/docs/readme.md";
+	// Relative images resolve against the markdown's directory.
+	const rewritten = rewriteMarkdownImages("![a](./img/x.png) ![b](../img/y.png) ![c](https://x.io/i.png) ![d](img.png \"title\")", md);
+	if (!rewritten.includes(`![a](${dshdFileUrl("/home/u/docs/img/x.png")})`)) throw new Error("relative image not rewritten: " + rewritten);
+	if (!rewritten.includes(`![b](${dshdFileUrl("/home/u/img/y.png")})`)) throw new Error("parent-relative image not rewritten");
+	if (!rewritten.includes("![c](https://x.io/i.png)")) throw new Error("remote image must stay untouched");
+	if (!rewritten.includes(`![d](${dshdFileUrl("/home/u/docs/img.png")} \"title\")`)) throw new Error("titled relative image must be rewritten and keep its title");
+	// Code fences stay literal.
+	const fenced = rewriteMarkdownImages("```md\n![x](./a.png)\n```\n\n![y](./b.png)", md);
+	if (!fenced.includes("![x](./a.png)")) throw new Error("fenced image was rewritten");
+	if (!fenced.includes(dshdFileUrl("/home/u/docs/b.png"))) throw new Error("image after the fence was not rewritten");
+	// TOC: level, stripped text, occurrence counting.
+	const toc = extractToc("# Title\n\n## A *bold*\n\n## A bold\n\n### Deep `code`\n");
+	if (JSON.stringify(toc) !== JSON.stringify([
+		{ level: 1, text: "Title", occurrence: 0 },
+		{ level: 2, text: "A bold", occurrence: 0 },
+		{ level: 2, text: "A bold", occurrence: 1 },
+		{ level: 3, text: "Deep code", occurrence: 0 }
+	])) throw new Error("toc mismatch: " + JSON.stringify(toc));
+	// URL normalization.
+	if (normalizeWebUrl("github.com") !== "https://github.com/") throw new Error("bare host should gain https");
+	if (normalizeWebUrl("http://a.b") !== "http://a.b/") throw new Error("http kept");
+	if (normalizeWebUrl("javascript:alert(1)") !== null) throw new Error("non-http(s) schemes rejected");
+	if (normalizeWebUrl("") !== null) throw new Error("empty rejected");
+	// Path resolution.
+	if (resolveLocalPath("/a/b", "../c/d.txt") !== "/a/c/d.txt") throw new Error("resolveLocalPath mismatch");
+	console.log("preview helpers OK (markdown rewrite, TOC, URL normalization, path resolution)");
+}
 
 // ── mock plugin context ──────────────────────────────────────────────────
 const registrations = [];
@@ -141,5 +182,61 @@ if (settingsHtml.length === 0) {
 	throw new Error("settings section rendered empty");
 }
 console.log("settings section rendered OK (" + settingsHtml.length + " chars)");
+
+// ── render the pure settings layout with a full state snapshot ──────────
+const SettingsView = plugin.desktopSettingsView;
+if (typeof SettingsView !== "function") {
+	throw new Error("client.js did not export desktopSettingsView");
+}
+const fakeState = {
+	version: "0.2.0",
+	settings: {
+		tray: true,
+		notifications: true,
+		auto_update_check: false,
+		update_interval_hours: 6,
+		tray_hide_hint_shown: false
+	},
+	update: null,
+	last_update_check: "2025-08-15T10:00:00Z",
+	update_check_error: null,
+	client: true
+};
+const viewProps = {
+	state: fakeState,
+	installInfo: { profile: "/home/u/.dsh/profiles/desktop", client: "/home/u/.local/bin/dsh-desktop-shell" },
+	notice: null,
+	busy: false,
+	progress: null,
+	workspacePath: "/home/u/work",
+	onSet: async () => {},
+	onCheckNow: async () => {},
+	onUpdateNow: async () => {},
+	onOpenRelease: async () => {},
+	onTestNotification: async () => {},
+	onResetGeometry: async () => {},
+	onPickWorkspace: async () => {}
+};
+const viewHtml = renderToString(h(SettingsView, viewProps));
+for (const token of [
+	"Window", "Workspace", "Notifications", "Updates", "About",
+	"Close window to tray", "Native notifications", "Check for updates automatically",
+	"Check interval", "Check for updates now", "Choose folder…", "/home/u/work",
+	"Up to date", "Reset", "Send test"
+]) {
+	if (!viewHtml.includes(token)) throw new Error(`settings view missing "${token}"`);
+}
+for (const gone of ["Open releases page", "Show explorer", "Hide panel", "File manager & preview", "Send test notification", "Pick folder"]) {
+	if (viewHtml.includes(gone)) throw new Error(`settings view still contains removed row "${gone}"`);
+}
+// The update banner renders with its one-click actions when an update is on offer.
+const withUpdate = renderToString(h(SettingsView, { ...viewProps, state: { ...fakeState, update: { version: "0.3.0", url: "https://github.com/s3yf1337/dsh-desktop/releases", published_at: null } } }));
+for (const token of ["0.3.0 is available", "Update now", "Open release"]) {
+	if (!withUpdate.includes(token)) throw new Error(`update banner missing "${token}"`);
+}
+// Transient action feedback renders as a notice line.
+const withNotice = renderToString(h(SettingsView, { ...viewProps, notice: "Test notification sent." }));
+if (!withNotice.includes("Test notification sent.")) throw new Error("action feedback notice missing");
+console.log("settings layout rendered OK (Window / Workspace / Notifications / Updates / About, no stray action rows)");
 
 console.log("\nclient.js smoke test PASSED");

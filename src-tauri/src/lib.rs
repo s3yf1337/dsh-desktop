@@ -253,11 +253,14 @@ fn run_window(raw: String) -> i32 {
 			commands::desktop_reset_geometry,
 			commands::desktop_test_notification,
 			commands::desktop_is_directory,
+			commands::desktop_set_title,
 			commands::desktop_update_now,
 			commands::desktop_install_info,
 			fs::desktop_list_dir,
 			fs::desktop_parent_dir,
 			fs::desktop_read_file,
+			fs::desktop_stat,
+			fs::desktop_hexdump,
 			fs::desktop_home_dir,
 			fs::desktop_write_file,
 			fs::desktop_create_dir,
@@ -315,9 +318,12 @@ fn run_window(raw: String) -> i32 {
 			}
 
 			// Control channel: the profile's desktop-shell plugin pipes JSON
-			// control messages into our stdin (agent lifecycle → notifications,
-			// session titles → window title). Read them on a background thread;
-			// the client's stdin is otherwise unused.
+			// control messages into our stdin (agent lifecycle →
+			// notifications; the window title itself is now driven by the
+			// webview's active-chat title through the desktop_set_title
+			// command, with this channel's "title" message kept as a
+			// fallback). Read them on a background thread; the client's
+			// stdin is otherwise unused.
 			{
 				let handle = app.handle().clone();
 				std::thread::spawn(move || {

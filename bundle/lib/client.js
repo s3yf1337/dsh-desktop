@@ -23,7 +23,6 @@ window.__ModuleLoader__.load({
 			IconDownloadOutline16,
 			IconRefreshOutline14,
 			IconGlobeOutline14,
-			IconSettingsOutline16,
 			IconFolderOpenOutline16,
 			IconFolderOpen16,
 			IconChevronLeftOutline14,
@@ -32,7 +31,6 @@ window.__ModuleLoader__.load({
 			IconCodeOutline16,
 			IconDataOutline16,
 			IconSearchOutline16,
-			IconPanelLeftOutline16,
 			Menu,
 			Modal,
 			writeClipboard,
@@ -46,7 +44,9 @@ window.__ModuleLoader__.load({
 			IconRightUpOutline14,
 			IconLinkOutline16,
 			IconSendOutline14,
-			IconFolderClose16
+			IconFolderClose16,
+			IconGlobeOutline16,
+			MarkdownText
 		} = _deepseek_ai_dsh_client_ui_primitives;
 
 		const NS = "desktopShell";
@@ -457,6 +457,47 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			edge("dshd-resize-se", "SouthEast");
 			edge("dshd-resize-sw", "SouthWest");
 		}
+
+		/** Keep the native window title in lockstep with the chat open in the
+		* UI right now. The sessions service's list snapshot carries the
+		* current session — the same fact source the app shell uses for the
+		* browser-tab title — so the window/taskbar title (and the custom bar
+		* caption) follows the active chat instead of the last started agent.
+		* It updates live: switching chats, opening/closing one, and session
+		* renames (auto or user) all move `current`/`title`. */
+		function watchDocumentTitle(ctx) {
+			const sessions = ctx && ctx.sessions;
+			if (!sessions || typeof sessions.list?.subscribe !== "function" || typeof sessions.list?.getSnapshot !== "function") return;
+			let last = null;
+			const push = () => {
+				let snapshot;
+				try {
+					snapshot = sessions.list.getSnapshot();
+				} catch {
+					return;
+				}
+				const id = snapshot && snapshot.current;
+				const session = id !== void 0 && snapshot.byId ? snapshot.byId[id] : void 0;
+				const chatTitle = typeof session?.title === "string" && session.title !== "" ? session.title : null;
+				// Same durable-title rule as the app shell's tab title: no
+				// active chat with a title → the plain app name.
+				const full = chatTitle === null ? "DeepSeek Harness" : `DeepSeek Harness — ${chatTitle}`;
+				if (full === last) return;
+				last = full;
+				// The bar caption updates immediately; the native title
+				// follows through the desktop_set_title command (which also
+				// echoes TITLE_EVENT back for any other listener).
+				const node = document.querySelector("#dshd-titlebar .dshd-title");
+				if (node) node.textContent = full;
+				window.__TAURI__.core
+					.invoke("desktop_set_title", { title: full })
+					.catch(() => {});
+			};
+			// The SPA may already have an active chat by the time this module
+			// mounts — sync it before subscribing.
+			push();
+			sessions.list.subscribe(push);
+		}
 		//#endregion
 
 		//#region explorer panel (Files / Preview tabs, right-hand, hideable)
@@ -505,6 +546,131 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 
 		function isImageName(name) {
 			return /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i.test(name || "");
+		}
+
+		// ── preview kind dispatch ──
+		function isMarkdownName(name) {
+			return /\.(md|markdown|mdx)$/i.test(name || "");
+		}
+
+		function isHtmlName(name) {
+			return /\.(html?|htm)$/i.test(name || "");
+		}
+
+		/** The directory of `path`, keeping the platform's separator style. */
+		function dirOf(path) {
+			const raw = String(path || "");
+			const index = Math.max(raw.lastIndexOf("/"), raw.lastIndexOf("\\"));
+			if (index === -1) return "";
+			if (index === 0) return "/";
+			// Windows drive root: "C:\\file" → "C:/"
+			if (index === 2 && /^[a-zA-Z]:/.test(raw)) return raw.slice(0, 2) + "/";
+			return raw.slice(0, index);
+		}
+
+		/** Resolve `rel` (possibly `./`/`../`) against `dir` into an absolute
+		* path. Both separators are accepted; the result uses `/`, which is
+		* valid on every platform the shell runs on. `..` climbs the base's
+		* own segments and clamps at the filesystem root. */
+		function resolveLocalPath(dir, rel) {
+			const base = String(dir).replace(/[\\/]+$/, "");
+			const drive = /^([a-zA-Z]:)[\\/]/.exec(base);
+			const isAbsolute = base.startsWith("/") || drive !== null;
+			const segs = base.split(/[\\/]/).filter((part) => part !== "");
+			if (drive) segs.shift(); // the drive letter is re-attached below
+			const parts = [];
+			for (const part of String(rel).split(/[\\/]/)) {
+				if (part === "" || part === ".") continue;
+				if (part === "..") {
+					if (parts.length > 0) parts.pop();
+					else if (segs.length > 0) segs.pop();
+					// above the root: dropped
+				} else parts.push(part);
+			}
+			const joined = [...segs, ...parts].join("/");
+			if (drive) return `${drive[1]}/${joined}`;
+			return isAbsolute ? `/${joined}` : joined;
+		}
+
+		/** Absolute http URL the preview route serves one local file at. The
+		* route is registered by the desktop-shell plugin on the harness web
+		* server (loopback-only); the browser cannot read the disk itself. */
+		function dshdFileUrl(path) {
+			return `${location.origin}/dshd-file/${encodeURIComponent(path)}`;
+		}
+
+		function isDshdFileUrl(url) {
+			return typeof url === "string" && url.startsWith(`${location.origin}/dshd-file/`);
+		}
+
+		/** Rewrite relative image destinations in markdown to absolute URLs of
+		* the local-file route, so `![](./img.png)` renders for local docs. The
+		* app's markdown renderer only allows absolute http(s) images, so the
+		* rewrite is what makes local images visible at all. */
+		function rewriteMarkdownImages(markdown, mdPath) {
+			const dir = dirOf(mdPath);
+			const rewrite = (whole, alt, url, rest) => {
+				if (/^(https?:|data:|mailto:)/i.test(url) || url.startsWith("#")) return whole;
+				// Absolute local paths (and Windows drive paths) pass through;
+				// anything else resolves against the markdown's own directory.
+				const abs = /^([a-zA-Z]:[\\/]|\/)/.test(url) ? url : resolveLocalPath(dir, url);
+				if (abs === "") return whole;
+				return `![${alt}](${dshdFileUrl(abs)}${rest ?? ""})`;
+			};
+			const imageRe = /!\[([^\]]*)\]\(\s*([^)\s]+)((?:\s+[^)]*)?)\)/g;
+			let fence = null;
+			return String(markdown).split("\n").map((line) => {
+				const trimmed = line.trim();
+				const open = /^(`{3,}|~{3,})/.exec(trimmed);
+				if (fence === null) {
+					if (open) {
+						fence = open[1][0];
+						return line;
+					}
+					return line.replace(imageRe, rewrite);
+				}
+				// Inside a fence: a same-char marker run of 3+ closes it.
+				if (new RegExp(`^\\${fence}{3,}\\s*$`).test(trimmed)) fence = null;
+				return line;
+			}).join("\n");
+		}
+
+		/** Extract a clickable outline from markdown source: heading level and
+		* plain text (markdown markup stripped so it matches the rendered
+		* textContent of the heading element). */
+		function extractToc(markdown) {
+			const toc = [];
+			const seen = new Map();
+			const re = /^(#{1,6})\s+(.+?)\s*#*\s*$/gm;
+			let match;
+			while ((match = re.exec(String(markdown)))) {
+				let text = match[2]
+					.replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+					.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+					.replace(/[*_`~]/g, "")
+					.replace(/\s+/g, " ")
+					.trim();
+				if (text === "") continue;
+				const key = `${match[1].length}:${text}`;
+				const occurrence = seen.get(key) ?? 0;
+				seen.set(key, occurrence + 1);
+				toc.push({ level: match[1].length, text, occurrence });
+			}
+			return toc;
+		}
+
+		/** Normalize a user-typed web address into an absolute http(s) URL, or
+		* `null` when it cannot be one. */
+		function normalizeWebUrl(raw) {
+			let value = String(raw || "").trim();
+			if (value === "") return null;
+			if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) value = "https://" + value;
+			try {
+				const parsed = new URL(value);
+				return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+			} catch {
+				return null;
+			}
 		}
 
 		function errText(caught) {
@@ -621,6 +787,16 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			const [error, setError] = useState(null);
 			const [preview, setPreview] = useState(null);
 			const [previewError, setPreviewError] = useState(null);
+			// Web preview: iframe remount key (reload), history, busy spinner,
+			// the page's own title (from the dshd-file bridge), image zoom.
+			const [webRev, setWebRev] = useState(0);
+			const [webHist, setWebHist] = useState([]);
+			const [webIndex, setWebIndex] = useState(-1);
+			const [webBusy, setWebBusy] = useState(false);
+			const [webTitle, setWebTitle] = useState(null);
+			const [urlDraft, setUrlDraft] = useState("");
+			const [zoom, setZoom] = useState(false);
+			const [imgDims, setImgDims] = useState(null);
 			const [busy, setBusy] = useState(false);
 			const panelRef = useRef(null);
 			// The panel stays mounted for one transition after closing, so the
@@ -945,22 +1121,255 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				tryNext(0);
 			}, [open, root, cwd, loadDir]);
 
+			// The last stat snapshot of the previewed file; a change (size or
+			// mtime) auto-refreshes the preview (markdown re-renders, html
+			// iframes reload, images re-read).
+			const previewStatRef = useRef(null);
+			// Mirrors for effect closures (interval/keydown must not re-arm
+			// per keystroke and must see fresh state).
+			const previewRef = useRef(null); previewRef.current = preview;
+			const zoomRef = useRef(false); zoomRef.current = zoom;
+			const webHistRef = useRef([]); webHistRef.current = webHist;
+			const webIndexRef = useRef(-1); webIndexRef.current = webIndex;
+			const mdRef = useRef(null);
+
 			const openFile = useCallback(async (path, name) => {
 				const seq = ++previewSeqRef.current;
 				setPreviewError(null);
-				setPreview({ path, name, loading: true });
+				setWebTitle(null);
+				setImgDims(null);
+				setPreview({ kind: "file", path, name, loading: true });
 				explorerStore.setTab("preview");
+				// Local .html/.htm previews are pages, not text: the iframe
+				// loads the file through the local-file route, so relative
+				// assets resolve — no content read needed.
+				if (isHtmlName(name)) {
+					try {
+						const stat = await window.__TAURI__.core.invoke("desktop_stat", { path });
+						if (seq !== previewSeqRef.current) return;
+						previewStatRef.current = { size: stat.size, modified_ms: stat.modified_ms };
+					} catch {
+						previewStatRef.current = null;
+					}
+					if (seq !== previewSeqRef.current) return;
+					setWebBusy(false);
+					setWebRev((rev) => rev + 1);
+					setPreview({ kind: "file", path, name, mode: "web", loading: false });
+					return;
+				}
 				try {
 					const content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
 					// A newer preview has superseded this response — drop it so it
 					// cannot overwrite the current file's preview.
 					if (seq !== previewSeqRef.current) return;
-					setPreview({ path, name, loading: false, ...content });
+					previewStatRef.current = { size: content.size, modified_ms: content.modified_ms };
+					if (content.encoding === "base64") {
+						setPreview({ kind: "file", path, name, mode: "image", loading: false, ...content });
+					} else if (content.encoding === "utf8" && isMarkdownName(name)) {
+						// Markdown renders with the app's own renderer (the
+						// conversation UI's), with relative images rewritten to
+						// the local-file route.
+						const source = rewriteMarkdownImages(content.content, path);
+						setPreview({ kind: "file", path, name, mode: "markdown", source, toc: extractToc(content.content), loading: false, ...content });
+					} else if (content.encoding === "utf8") {
+						setPreview({ kind: "file", path, name, mode: "text", loading: false, ...content });
+					} else {
+						// Binary: hex dump of the head instead of "no preview".
+						let dump;
+						try {
+							dump = await window.__TAURI__.core.invoke("desktop_hexdump", { path });
+						} catch {
+							dump = null;
+						}
+						if (seq !== previewSeqRef.current) return;
+						if (dump) {
+							previewStatRef.current = null;
+							setPreview({ kind: "file", path, name, mode: "hexdump", loading: false, size: dump.size, text: dump.text, truncated: dump.truncated });
+						} else {
+							setPreview({ kind: "file", path, name, mode: "binary", loading: false, ...content });
+						}
+					}
 				} catch (caught) {
 					if (seq !== previewSeqRef.current) return;
-					setPreview({ path, name, loading: false, failed: true, error: errText(caught) });
+					previewStatRef.current = null;
+					setPreview({ kind: "file", path, name, loading: false, failed: true, error: errText(caught) });
 				}
 			}, []);
+
+			// Open a web address in the preview pane (the URL bar in the
+			// preview's empty state and header).
+			const openUrl = useCallback((raw) => {
+				const url = normalizeWebUrl(raw);
+				if (url === null) {
+					setPreview((current) => current && current.kind === "url"
+						? { ...current, failed: true, error: "Not a valid http(s) address." }
+						: { kind: "url", url: "", name: "Web", loading: false, failed: true, error: "Not a valid http(s) address." });
+					return;
+				}
+				setPreviewError(null);
+				setWebTitle(null);
+				setUrlDraft(url);
+				const index = webIndexRef.current;
+				const hist = webHistRef.current.slice(0, index + 1);
+				hist.push(url);
+				const next = hist.slice(-50);
+				webHistRef.current = next;
+				setWebHist(next);
+				setWebIndex(next.length - 1);
+				setWebBusy(true);
+				setWebRev((rev) => rev + 1);
+				let host = url;
+				try {
+					host = new URL(url).host;
+				} catch {
+					// keep the raw url as the caption
+				}
+				setPreview({ kind: "url", url, name: host, loading: false });
+				explorerStore.setTab("preview");
+			}, []);
+
+			const webBack = useCallback(() => {
+				const index = webIndexRef.current;
+				if (index <= 0) return;
+				const target = webHistRef.current[index - 1];
+				webIndexRef.current = index - 1;
+				setWebIndex(index - 1);
+				setWebTitle(null);
+				setUrlDraft(target);
+				setWebBusy(true);
+				setWebRev((rev) => rev + 1);
+				setPreview({ kind: "url", url: target, name: (() => { try { return new URL(target).host; } catch { return target; } })(), loading: false });
+			}, []);
+
+			const webForward = useCallback(() => {
+				const index = webIndexRef.current;
+				if (index >= webHistRef.current.length - 1) return;
+				const target = webHistRef.current[index + 1];
+				webIndexRef.current = index + 1;
+				setWebIndex(index + 1);
+				setWebTitle(null);
+				setUrlDraft(target);
+				setWebBusy(true);
+				setWebRev((rev) => rev + 1);
+				setPreview({ kind: "url", url: target, name: (() => { try { return new URL(target).host; } catch { return target; } })(), loading: false });
+			}, []);
+
+			// Re-read the current preview (Ctrl+R / header reload).
+			const reloadPreview = useCallback(() => {
+				const current = previewRef.current;
+				if (!current) return;
+				if (current.kind === "url") {
+					setWebBusy(true);
+					setWebRev((rev) => rev + 1);
+					return;
+				}
+				openFile(current.path, current.name);
+			}, [openFile]);
+
+			// Tauri invoke wrapper for the panel (declared before the bridge
+			// effect below, which calls it).
+			const run = useCallback(async (command, args) => {
+				try {
+					await window.__TAURI__.core.invoke(command, args);
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			}, []);
+
+			// Bridge messages from local pages previewed in the sandboxed
+			// iframe (the dshd-file route injects the bridge script): open
+			// external links in the system browser, show the page's title.
+			useEffect(() => {
+				const onMessage = (event) => {
+					const data = event.data;
+					if (!data || data.source !== "dshd-file") return;
+					if (data.type === "open" && typeof data.url === "string") {
+						run("desktop_open_path", { path: data.url });
+					} else if (data.type === "title" && typeof data.title === "string") {
+						setWebTitle(data.title);
+					}
+				};
+				window.addEventListener("message", onMessage);
+				return () => window.removeEventListener("message", onMessage);
+			}, [run]);
+
+
+
+			// Auto-refresh: while a file preview is open, re-read it when the
+			// file changes on disk (mtime/size), so markdown/images/html track
+			// the editor instead of going stale.
+			useEffect(() => {
+				if (!open || picking || tab !== "preview" || !preview || preview.kind !== "file" || preview.loading || preview.mode === "web" || preview.mode === "hexdump" || preview.mode === "binary" || !hasTauri()) return;
+				const timer = setInterval(async () => {
+					if (typeof document !== "undefined" && document.hidden) return;
+					const current = previewRef.current;
+					if (!current || current.kind !== "file" || !current.path) return;
+					try {
+						const stat = await window.__TAURI__.core.invoke("desktop_stat", { path: current.path });
+						const prev = previewStatRef.current;
+						if (prev && (stat.size !== prev.size || stat.modified_ms !== prev.modified_ms)) {
+							previewStatRef.current = { size: stat.size, modified_ms: stat.modified_ms };
+							openFile(current.path, current.name);
+						}
+					} catch {
+						// file gone or unreadable — keep the last preview
+					}
+				}, 2000);
+				return () => clearInterval(timer);
+			}, [open, picking, tab, preview, openFile]);
+
+			// Same watch for local html previews: the file is not read into
+			// JS, so the iframe reloads (rev bump) instead of a re-read.
+			useEffect(() => {
+				if (!open || picking || tab !== "preview" || !preview || preview.kind !== "file" || preview.mode !== "web" || !hasTauri()) return;
+				const timer = setInterval(async () => {
+					if (typeof document !== "undefined" && document.hidden) return;
+					const current = previewRef.current;
+					if (!current || current.kind !== "file" || current.mode !== "web") return;
+					try {
+						const stat = await window.__TAURI__.core.invoke("desktop_stat", { path: current.path });
+						const prev = previewStatRef.current;
+						if (prev && (stat.size !== prev.size || stat.modified_ms !== prev.modified_ms)) {
+							previewStatRef.current = { size: stat.size, modified_ms: stat.modified_ms };
+							setWebRev((rev) => rev + 1);
+						}
+					} catch {
+						// keep the last rendered page
+					}
+				}, 2000);
+				return () => clearInterval(timer);
+			}, [open, picking, tab, preview]);
+
+			// Preview hotkeys: Esc leaves the preview back to the file list,
+			// Ctrl/Cmd+R reloads the current preview. Typing anywhere (URL
+			// bar, filter, rename) is left alone.
+			useEffect(() => {
+				const onKey = (event) => {
+					if (!previewRef.current) return;
+					const el = document.activeElement;
+					if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
+					if (event.key === "Escape") {
+						if (zoomRef.current) {
+							setZoom(false);
+						} else {
+							explorerStore.setTab("files");
+						}
+					} else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r") {
+						event.preventDefault();
+						reloadPreview();
+					}
+				};
+				window.addEventListener("keydown", onKey);
+				return () => window.removeEventListener("keydown", onKey);
+			}, [reloadPreview]);
+
+			// The web preview spinner never hangs: hide it on load or after
+			// 4 s (a site refusing to be framed never fires load).
+			useEffect(() => {
+				if (!webBusy) return;
+				const timer = setTimeout(() => setWebBusy(false), 4000);
+				return () => clearTimeout(timer);
+			}, [webBusy, webRev]);
 
 			const goUp = useCallback(async () => {
 				if (!cwd) return;
@@ -971,14 +1380,6 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					setError(errText(caught));
 				}
 			}, [cwd, navigate]);
-
-			const run = useCallback(async (command, args) => {
-				try {
-					await window.__TAURI__.core.invoke(command, args);
-				} catch (caught) {
-					setError(errText(caught));
-				}
-			}, []);
 
 			// Live refresh (Г): while the panel shows the file list, quietly
 			// re-list the current directory every 2 s and mark what changed.
@@ -1661,6 +2062,174 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				);
 			};
 
+			// ── preview body ──
+			const urlInputStyle = {
+				flex: 1,
+				minWidth: 0,
+				fontSize: 12,
+				padding: "3px 8px",
+				borderRadius: 6,
+				border: "1px solid var(--dsw-alias-border-l2)",
+				background: "var(--dsw-alias-bg-base)",
+				color: "var(--dsw-alias-label-primary)",
+				outline: "none"
+			};
+
+			/** Scroll the rendered markdown to a TOC heading: the app's renderer
+			* emits plain h1–h6, so the heading is found by tag + text. */
+			const scrollToc = (item) => {
+				const root = mdRef.current;
+				if (!root) return;
+				const heads = root.querySelectorAll(`h${item.level}`);
+				let seen = 0;
+				for (const head of heads) {
+					if ((head.textContent || "").trim() === item.text) {
+						if (seen === item.occurrence) {
+							head.scrollIntoView({ behavior: "smooth", block: "start" });
+							return;
+						}
+						seen++;
+					}
+				}
+			};
+
+			const tocItemStyle = (level) => ({
+				display: "block",
+				width: "100%",
+				textAlign: "left",
+				border: "none",
+				background: "none",
+				cursor: "pointer",
+				color: "var(--dsw-alias-label-secondary)",
+				fontSize: Math.max(10, 13 - level),
+				lineHeight: 1.5,
+				padding: "1px 0 1px " + ((level - 1) * 10) + "px",
+				borderRadius: 4,
+				overflow: "hidden",
+				textOverflow: "ellipsis",
+				whiteSpace: "nowrap"
+			});
+
+			/** The Preview tab's content for one preview state. */
+			const previewBody = (current) => {
+				if (current.loading) {
+					return h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, "Loading…");
+				}
+				if (current.failed) {
+					return h("div", { style: { padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } },
+						current.error || "Cannot read this file.");
+				}
+				if (current.kind === "url") {
+					return h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
+						h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "0 0 6px", flex: "none", display: "flex", alignItems: "center", gap: 6 } },
+							"Some sites refuse to be embedded. ",
+							h("button", {
+								type: "button",
+								style: { border: "none", background: "none", padding: 0, cursor: "pointer", color: "var(--dsw-alias-state-info-primary, #4f6ef7)", fontSize: 11, textDecoration: "underline" },
+								onClick: () => run("desktop_open_path", { path: current.url })
+							}, "Open in browser")),
+						h("div", { style: { flex: 1, minHeight: 0, position: "relative" } },
+							h("iframe", {
+								key: webRev,
+								src: current.url,
+								sandbox: "allow-scripts allow-forms allow-popups allow-same-origin",
+								referrerPolicy: "no-referrer",
+								style: { position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "#fff" },
+								onLoad: () => setWebBusy(false)
+							}),
+							webBusy
+								? h("div", { style: { position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 12, pointerEvents: "none" } }, "Loading…")
+								: null));
+				}
+				if (current.mode === "web") {
+					// Local page: served through the loopback file route so
+					// relative assets resolve; sandboxed to an opaque origin so
+					// the page's scripts cannot touch the app.
+					return h("div", { style: { flex: 1, minHeight: 0, position: "relative", background: "#fff" } },
+						h("iframe", {
+							key: webRev,
+							src: `${dshdFileUrl(current.path)}?rev=${webRev}`,
+							sandbox: "allow-scripts allow-forms",
+							referrerPolicy: "no-referrer",
+							style: { position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }
+						}));
+				}
+				if (current.mode === "image") {
+					return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", display: "flex", flexDirection: "column", padding: 12, gap: 8 } },
+						h("div", {
+							style: { flex: 1, minHeight: 0, display: "grid", placeItems: "center", cursor: "zoom-in", overflow: "hidden" },
+							title: "Click to zoom",
+							onClick: () => setZoom(true)
+						},
+							h("img", {
+								src: `data:${current.mime || "image/png"};base64,${current.content}`,
+								alt: current.name,
+								onLoad: (event) => {
+									const width = event.target.naturalWidth;
+									const height = event.target.naturalHeight;
+									if (width && height) setImgDims({ width, height });
+								},
+								style: { maxWidth: "100%", maxHeight: "100%", borderRadius: 6, objectFit: "contain" }
+							})),
+						h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", textAlign: "center", flex: "none" } },
+							[formatSize(current.size), imgDims ? ` · ${imgDims.width}×${imgDims.height}` : "", " · click to zoom"].join("")));
+				}
+				if (current.mode === "markdown") {
+					return h("div", { ref: mdRef, className: "dshd-scroll", style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" } },
+						current.toc && current.toc.length > 1
+							? h("details", { style: { margin: "4px 0 12px", fontSize: 12, color: "var(--dsw-alias-label-secondary)" } },
+									h("summary", { style: { cursor: "pointer", userSelect: "none" } },
+										`Table of contents (${current.toc.length})`),
+									h("div", { style: { marginTop: 6, display: "flex", flexDirection: "column", gap: 2 } },
+										current.toc.map((item, index) =>
+											h("button", { key: index, type: "button", title: item.text, onClick: () => scrollToc(item), style: tocItemStyle(item.level) }, item.text))))
+							: null,
+						h(MarkdownText, { text: current.source, codeLabels: { copyLabel: "Copy", copiedLabel: "Copied" } }),
+						current.truncated
+							? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
+									`Preview cut at 1 MB — the full file is ${formatSize(current.size)}.`)
+							: null);
+				}
+				if (current.mode === "hexdump") {
+					return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
+						h("pre", {
+							style: {
+								margin: 0,
+								fontFamily: "var(--ds-font-family-code, monospace)",
+								fontSize: 11,
+								lineHeight: 1.55,
+								color: "var(--dsw-alias-label-secondary)",
+								whiteSpace: "pre"
+							}
+						}, current.text || " "),
+						h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
+							current.truncated
+								? `Showing the first 32 KB of ${formatSize(current.size)}.`
+								: `${formatSize(current.size)} binary file.`));
+				}
+				if (current.mode === "binary") {
+					return h("div", { style: { padding: 24, fontSize: 13, color: "var(--dsw-alias-label-tertiary)", textAlign: "center" } },
+						"This is a binary file (no preview).");
+				}
+				// Plain text.
+				return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
+					h("pre", {
+						style: {
+							margin: 0,
+							fontFamily: "var(--ds-font-family-code, monospace)",
+							fontSize: 12,
+							lineHeight: 1.6,
+							color: "var(--dsw-alias-label-secondary)",
+							whiteSpace: "pre-wrap",
+							wordBreak: "break-word"
+						}
+					}, current.content || " "),
+					current.truncated
+						? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
+								`Preview cut at 1 MB — the full file is ${formatSize(current.size)}.`)
+						: null);
+			};
+
 			return h("div", { ref: panelRef, className: "dshd-explorer-panel", style: { ...style, outline: "none" }, tabIndex: 0, onKeyDown: onKeyDown, "data-dshd-explorer": true },
 				// Resize handle (docked columns have one, like the app's own).
 				h("div", { id: "dshd-explorer-resize", onPointerDown: (event) => startResize(event) }),
@@ -1811,8 +2380,22 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						)
 					: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
 							preview === null
-								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: 24, textAlign: "center" } },
-										"Select a file in the Files tab to preview it here.")
+								? h("div", { style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 24, textAlign: "center" } },
+										h("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } },
+											"Select a file in the Files tab to preview it here."),
+										h("div", { style: { display: "flex", gap: 6, width: "100%", maxWidth: 300 } },
+											h("input", {
+												style: urlInputStyle,
+												placeholder: "…or open a web page (https://…)",
+												value: urlDraft,
+												onChange: (event) => setUrlDraft(event.target.value),
+												onKeyDown: (event) => {
+													event.stopPropagation();
+													if (event.key === "Enter") openUrl(urlDraft);
+												}
+											}),
+											h("button", { type: "button", className: "dshd-round", title: "Open URL", style: roundButton, onClick: () => openUrl(urlDraft) },
+												h(IconGlobeOutline16, {}))))
 								: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
 										h("div", { style: { display: "flex", alignItems: "center", gap: 4, padding: "0 0 8px", flex: "none" } },
 											h("button", {
@@ -1822,34 +2405,81 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 												onClick: () => explorerStore.setTab("files"),
 												style: roundButton
 											}, h(IconChevronLeftOutline14, {})),
-											h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 500 } }, preview.name || "")
+											preview.kind === "url"
+												? h("input", {
+														style: urlInputStyle,
+														placeholder: "https://…",
+														value: urlDraft,
+														onChange: (event) => setUrlDraft(event.target.value),
+														onKeyDown: (event) => {
+															event.stopPropagation();
+															if (event.key === "Enter") openUrl(urlDraft);
+														},
+														onFocus: (event) => event.target.select()
+													})
+												: h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 500 }, title: preview.path || preview.url || "" },
+														webTitle || preview.name || ""),
+											preview.kind === "url"
+												? h("button", { type: "button", className: "dshd-round", title: "Back", disabled: webIndex <= 0, onClick: webBack, style: { ...roundButton, opacity: webIndex <= 0 ? 0.4 : 1 } },
+														h(IconChevronLeftOutline14, {}))
+												: null,
+											preview.kind === "url"
+												? h("button", { type: "button", className: "dshd-round", title: "Forward", disabled: webIndex >= webHist.length - 1, onClick: webForward, style: { ...roundButton, opacity: webIndex >= webHist.length - 1 ? 0.4 : 1 } },
+													h(IconChevronRightOutline14, {}))
+												: null,
+											h("button", { type: "button", className: "dshd-round", title: "Reload (Ctrl+R)", onClick: reloadPreview, style: roundButton },
+												h(IconRefreshOutline14, {})),
+											h("button", {
+												type: "button",
+												className: "dshd-round",
+												title: preview.kind === "url" ? "Open in browser" : "Open externally",
+												onClick: () => run("desktop_open_path", { path: preview.kind === "url" ? preview.url : preview.path }),
+												style: roundButton
+											}, h(IconRightUpOutline14, {})),
+											h("button", {
+												type: "button",
+												className: "dshd-round",
+												title: preview.kind === "url" ? "Copy URL" : "Copy path",
+												onClick: () => writeClipboard(preview.kind === "url" ? preview.url : preview.path),
+												style: roundButton
+											}, h(IconCopyOutline16, {})),
+											h("button", {
+												type: "button",
+												className: "dshd-round",
+												title: "Send path to agent",
+												disabled: !sessions,
+												onClick: () => {
+													if (preview.kind !== "file") return;
+													if (!insertPathIntoComposer(sessions, relativeTo(currentWorkspacePath, preview.path))) {
+														setError("No active conversation to insert the path into.");
+													}
+												},
+												style: { ...roundButton, opacity: !sessions ? 0.4 : 1 }
+											}, h(IconSendOutline14, {})),
+											preview.kind === "file" && preview.mode === "image"
+												? h("button", {
+														type: "button",
+														className: "dshd-round",
+														title: "Attach to message",
+														disabled: !sessions,
+														onClick: () => {
+															attachImageToComposer(sessions, conversation, preview.path, preview.name).then((ok) => {
+																if (!ok) setError("Cannot attach the image: no active conversation or unreadable file.");
+															});
+														},
+														style: { ...roundButton, opacity: !sessions ? 0.4 : 1 }
+													}, h(IconPaperclipOutline16, {}))
+												: null
 										),
-										preview.loading
-											? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, "Loading…")
-											: preview.failed
-												? h("div", { style: { padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, preview.error || "Cannot read this file.")
-												: preview.encoding === "base64"
-													? h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", display: "grid", placeItems: "center", padding: 12 } },
-															h("img", { src: `data:${preview.mime || "image/png"};base64,${preview.content}`, alt: preview.name, style: { maxWidth: "100%", maxHeight: "100%", borderRadius: 6 } }))
-													: preview.encoding === "binary"
-														? h("div", { style: { padding: 24, fontSize: 13, color: "var(--dsw-alias-label-tertiary)", textAlign: "center" } },
-																"This is a binary file (no preview).")
-														: h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
-																h("pre", {
-																	style: {
-																		margin: 0,
-																		fontFamily: "var(--ds-font-family-code, monospace)",
-																		fontSize: 12,
-																		lineHeight: 1.6,
-																		color: "var(--dsw-alias-label-secondary)",
-																		whiteSpace: "pre-wrap",
-																		wordBreak: "break-word"
-																	}
-																}, preview.content || " "),
-																preview.truncated
-																	? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
-																			`Preview cut at 1 MB — the full file is ${formatSize(preview.size)}.`)
-																	: null)
+										previewBody(preview),
+										zoom && preview.kind === "file" && preview.mode === "image"
+											? h("div", {
+													style: { position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.78)", display: "grid", placeItems: "center", cursor: "zoom-out" },
+													title: "Click to close (Esc)",
+													onClick: () => setZoom(false)
+												},
+													h("img", { src: `data:${preview.mime || "image/png"};base64,${preview.content}`, alt: preview.name, style: { maxWidth: "94vw", maxHeight: "94vh", borderRadius: 8, boxShadow: "0 8px 40px rgba(0,0,0,0.5)" } }))
+											: null
 									)
 						),
 
@@ -1938,12 +2568,14 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			fontVariantNumeric: "tabular-nums"
 		};
 
-		/** One labelled row: text on the left, arbitrary control on the right. */
-		function Row({ label, hint, control }) {
+		/** One labelled row: text on the left, arbitrary control on the right.
+		* `result` is an optional line under the hint — an action's outcome. */
+		function Row({ label, hint, control, result }) {
 			return h("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "5px 0" } },
 				h("div", { style: { flex: 1, minWidth: 0 } },
 					h("div", { style: LABEL }, label),
-					hint ? h("div", { style: HINT }, hint) : null
+					hint ? h("div", { style: HINT }, hint) : null,
+					result ? h("div", { style: { ...HINT, marginTop: 4 } }, result) : null
 				),
 				control
 			);
@@ -1998,13 +2630,26 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			return error && typeof error === "object" && error.message ? error.message : String(error);
 		}
 
-		function DesktopSection({ openWorkspace }) {
+		function DesktopSection({ openWorkspace, workspaces }) {
 			const tauri = hasTauri();
 			const [state, setState] = useState(null);
 			const [error, setError] = useState(null);
 			const [busy, setBusy] = useState(false);
+			const [notice, setNotice] = useState(null);
 			const [progress, setProgress] = useState(null);
 			const [installInfo, setInstallInfo] = useState(null);
+			const noticeTimer = useRef(null);
+
+			/** Transient inline feedback for one-shot actions (reset, test). */
+			const flash = useCallback((message) => {
+				setNotice(message);
+				if (noticeTimer.current) clearTimeout(noticeTimer.current);
+				noticeTimer.current = setTimeout(() => setNotice(null), 4000);
+			}, []);
+
+			useEffect(() => () => {
+				if (noticeTimer.current) clearTimeout(noticeTimer.current);
+			}, []);
 
 			const refresh = useCallback(async () => {
 				try {
@@ -2041,6 +2686,32 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					if (offProgress) offProgress();
 				};
 			}, [tauri, refresh]);
+
+			// The workspace the harness works in (first attached folder), kept
+			// live so the card shows what the agent actually works on.
+			const [workspacePath, setWorkspacePath] = useState(null);
+			useEffect(() => {
+				if (!tauri || !workspaces || typeof workspaces.list?.getSnapshot !== "function") return;
+				const read = () => {
+					try {
+						const snapshot = workspaces.list.getSnapshot();
+						for (const item of snapshot.items || []) {
+							const view = item && typeof item.getSnapshot === "function" ? item.getSnapshot().view : item && item.view;
+							if (view && typeof view.path === "string" && view.path !== "") {
+								setWorkspacePath(view.path);
+								return;
+							}
+						}
+						setWorkspacePath(null);
+					} catch {
+						// store not ready yet — next subscription tick will retry
+					}
+				};
+				read();
+				if (typeof workspaces.list.subscribe === "function") {
+					return workspaces.list.subscribe(read);
+				}
+			}, [tauri, workspaces]);
 
 			const setSetting = useCallback(async (key, value) => {
 				try {
@@ -2089,6 +2760,26 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				}
 			}, []);
 
+			const testNotification = useCallback(async () => {
+				try {
+					setError(null);
+					await window.__TAURI__.core.invoke("desktop_test_notification");
+					flash("Test notification sent.");
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			}, [flash]);
+
+			const resetGeometry = useCallback(async () => {
+				try {
+					setError(null);
+					await window.__TAURI__.core.invoke("desktop_reset_geometry");
+					flash("Window size and position reset.");
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			}, [flash]);
+
 			// Workspace folder → the explorer panel's "choose a folder" mode
 			// (no OS dialog: the same file manager the user browses with).
 			const pickWorkspace = useCallback(() => {
@@ -2120,6 +2811,29 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				return h("div", { style: { ...CARD } }, "Loading…");
 			}
 
+			return h(DesktopSettingsView, {
+				state,
+				error,
+				installInfo,
+				notice,
+				busy,
+				progress,
+				workspacePath,
+				onSet: setSetting,
+				onCheckNow: checkNow,
+				onUpdateNow: updateNow,
+				onOpenRelease: () => run("desktop_open_release"),
+				onTestNotification: testNotification,
+				onResetGeometry: resetGeometry,
+				onPickWorkspace: pickWorkspace
+			});
+		}
+
+		/** Pure settings layout: renders the whole page from a state snapshot.
+		* Split from DesktopSection so the smoke test can render the real
+		* markup without a native client. Handlers are one-way props; the
+		* container owns fetching, busy state and feedback. */
+		function DesktopSettingsView({ state, error, installInfo, notice, busy, progress, workspacePath, onSet, onCheckNow, onUpdateNow, onOpenRelease, onTestNotification, onResetGeometry, onPickWorkspace }) {
 			const settings = state.settings;
 			const update = state.update;
 			const lastCheck = state.last_update_check
@@ -2132,11 +2846,31 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			const progressPercent = progress && progress.total ? Math.min(100, Math.round(((progress.received || 0) / progress.total) * 100)) : null;
 			const updating = progress !== null && progress.phase !== "restarting";
 
+			// Outcome of the last "Check now": an update on offer, or up to date.
+			const checkOutcome = update
+				? h("span", { style: { color: "var(--dsw-alias-state-business-primary)" } }, `v${update.version} available — update from the banner above.`)
+				: state.last_update_check
+					? h("span", { style: { color: "var(--dsw-alias-state-success-primary)" } }, `Up to date — checked ${lastCheck}.`)
+					: null;
+
+			// The select shows the stored interval even when it isn't one of
+			// the presets (older versions clamped to arbitrary values).
+			const INTERVAL_OPTIONS = [1, 3, 6, 12, 24];
+			const intervalOptions = INTERVAL_OPTIONS.includes(settings.update_interval_hours)
+				? INTERVAL_OPTIONS
+				: [settings.update_interval_hours, ...INTERVAL_OPTIONS];
+
 			return h("div", { style: { width: "100%", maxWidth: 760, color: "var(--dsw-alias-label-primary)", display: "flex", flexDirection: "column" } },
 				// Live error line (invoke failures, check errors, update errors).
 				error || state.update_check_error
 					? h("div", { style: { ...CARD, borderColor: "var(--dsw-alias-state-error-primary)", color: "var(--dsw-alias-state-error-primary)" } },
 							error || state.update_check_error)
+					: null,
+
+				// Transient feedback for one-shot actions ("Test notification sent").
+				notice
+					? h("div", { style: { ...CARD, borderColor: "var(--dsw-alias-state-success-primary)", display: "flex", alignItems: "center", gap: 8 } },
+							h(IconCheckOutline14, {}), h("span", { style: { color: "var(--dsw-alias-label-primary)" } }, notice))
 					: null,
 
 				// Update suggestion banner — one-click update, never automatic.
@@ -2151,9 +2885,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 											: "Updates are never applied automatically — click Update when ready."
 									)
 								),
-								h(Button, { variant: "primary", size: "sm", icon: h(IconDownloadOutline16, {}), disabled: busy, onClick: () => updateNow() },
+								h(Button, { variant: "primary", size: "sm", icon: h(IconDownloadOutline16, {}), disabled: busy, onClick: () => onUpdateNow() },
 									updating ? "Updating…" : "Update now"),
-								h(Button, { size: "sm", icon: h(IconGlobeOutline14, {}), disabled: busy, onClick: () => run("desktop_open_release") }, "Open release")
+								h(Button, { size: "sm", icon: h(IconGlobeOutline14, {}), disabled: busy, onClick: () => onOpenRelease() }, "Open release")
 							),
 							// Progress bar while downloading/applying.
 							updating && progressPercent !== null
@@ -2172,110 +2906,88 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						)
 					: null,
 
-				// General.
-				h("div", { style: CARD },
-					h("div", { style: H3 }, "General"),
-					h(Row, { label: "Version", control: h("span", { style: VALUE }, `v${state.version}`) }),
-					h(Row, { label: "Last update check", control: h("span", { style: VALUE }, lastCheck) })
-				),
-
 				// Window.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Window"),
+					h("div", { style: { ...HINT, margin: "0 0 6px" } }, "How the window behaves in your desktop environment."),
 					h(Row, {
-						label: "Close to tray",
+						label: "Close window to tray",
 						hint: "Closing the window hides it to the tray and keeps the harness running; Quit from the tray exits.",
-						control: h(Switch, { checked: settings.tray, onChange: (value) => setSetting("tray", value) })
+						control: h(Switch, { checked: settings.tray, onChange: (value) => onSet("tray", value) })
 					}),
 					h(Row, {
-						label: "Window geometry",
-						hint: "Size and position are remembered across restarts. Reset to the default 1280×860 centered.",
-						control: h(Button, { size: "sm", icon: h(IconSettingsOutline16, {}), onClick: () => run("desktop_reset_geometry") }, "Reset")
+						label: "Window size and position",
+						hint: "Remembered across restarts. Reset returns to the default 1280×860, centered.",
+						control: h(Button, { size: "sm", onClick: () => onResetGeometry() }, "Reset")
 					})
 				),
 
 				// Workspace.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Workspace"),
+					h("div", { style: { ...HINT, margin: "0 0 6px" } }, "The folder the harness works in. You can also drag a folder into the window."),
 					h(Row, {
-						label: "Choose folder…",
-						hint: "Pick a directory in the file manager panel and attach it as a workspace. You can also just drag a folder into the window.",
-						control: h(Button, {
-							size: "sm",
-							icon: h(IconFolderOpenOutline16, {}),
-							disabled: busy,
-							onClick: () => pickWorkspace()
-						}, "Pick folder")
-					})
-				),
-
-				// File manager.
-				h("div", { style: CARD },
-					h("div", { style: H3 }, "File manager & preview"),
-					h(Row, {
-						label: "Show explorer",
-						hint: "The panel on the right browses your workspace and previews files. Toggle it from the title bar (folder icon) or here.",
-						control: h(Button, {
-							size: "sm",
-							icon: h(IconPanelLeftOutline16, {}),
-							onClick: () => explorerStore.toggle()
-						}, explorerStore.open ? "Hide panel" : "Show panel")
+						label: workspacePath ? baseName(workspacePath) : "No workspace yet",
+						hint: workspacePath ? workspacePath : "Choose a folder to give the harness a place to work.",
+						control: h(Button, { size: "sm", icon: h(IconFolderOpenOutline16, {}), disabled: busy, onClick: () => onPickWorkspace() }, "Choose folder…")
 					})
 				),
 
 				// Notifications.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Notifications"),
+					h("div", { style: { ...HINT, margin: "0 0 6px" } }, "OS notifications for finished agents, errors and questions — plus update and tray hints."),
 					h(Row, {
 						label: "Native notifications",
-						hint: "Update available, tray hints, and background events as OS notifications.",
-						control: h(Switch, { checked: settings.notifications, onChange: (value) => setSetting("notifications", value) })
+						hint: "Shown by your desktop environment, not inside the window.",
+						control: h(Switch, { checked: settings.notifications, onChange: (value) => onSet("notifications", value) })
 					}),
 					h(Row, {
-						label: "Test",
-						hint: "Send a sample notification to check your desktop environment.",
-						control: h(Button, { size: "sm", disabled: !settings.notifications, onClick: () => run("desktop_test_notification") }, "Send test notification")
+						label: "Test notifications",
+						hint: "Send a sample notification to check that your desktop environment shows them.",
+						control: h(Button, { size: "sm", disabled: !settings.notifications, onClick: () => onTestNotification() }, "Send test")
 					})
 				),
 
 				// Updates.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Updates"),
+					h("div", { style: { ...HINT, margin: "0 0 6px" } }, "The desktop client updates from GitHub releases. Nothing is ever applied automatically."),
 					h(Row, {
 						label: "Check for updates automatically",
-						hint: "Queries GitHub releases periodically. Off by default — updates are one click whenever you want them, never forced.",
-						control: h(Switch, { checked: settings.auto_update_check, onChange: (value) => setSetting("auto_update_check", value) })
+						hint: "Queries GitHub releases periodically. Off by default — updates are one click whenever you want them.",
+						control: h(Switch, { checked: settings.auto_update_check, onChange: (value) => onSet("auto_update_check", value) })
 					}),
 					h(Row, {
 						label: "Check interval",
 						hint: "How often to re-check while automatic checking is enabled.",
 						control: h(Select, {
 							value: settings.update_interval_hours,
-							options: [1, 3, 6, 12, 24],
+							options: intervalOptions,
 							disabled: !settings.auto_update_check,
-							onChange: (value) => setSetting("update_interval_hours", value)
+							onChange: (value) => onSet("update_interval_hours", value)
 						})
 					}),
 					h(Row, {
-						label: "Check now",
-						hint: "Run an update check immediately.",
-						control: h(Button, { size: "sm", icon: h(IconRefreshOutline14, {}), disabled: busy, onClick: () => checkNow() }, busy ? "Checking…" : "Check for updates")
-					}),
-					h(Row, {
-						label: "Releases",
-						hint: "Open the GitHub releases page in your browser.",
-						control: h(Button, { size: "sm", icon: h(IconGlobeOutline14, {}), onClick: () => run("desktop_open_release") }, "Open releases page")
+						label: "Check for updates now",
+						hint: "Run an update check right away.",
+						result: checkOutcome,
+						control: h(Button, { size: "sm", icon: h(IconRefreshOutline14, {}), disabled: busy, onClick: () => onCheckNow() }, busy ? "Checking…" : "Check now")
 					})
 				),
 
-				// Installation (the plugin installer story).
-				installInfo
-					? h("div", { style: CARD },
-							h("div", { style: H3 }, "Installation"),
-							h(Row, { label: "Profile", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.profile) }),
-							h(Row, { label: "Client", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.client) })
-						)
-					: null
+				// About — diagnostics only, no actions.
+				h("div", { style: CARD },
+					h("div", { style: H3 }, "About"),
+					h("div", { style: { ...HINT, margin: "0 0 6px" } }, "Version and install paths — useful when reporting a problem."),
+					h(Row, { label: "Version", control: h("span", { style: VALUE }, `v${state.version}`) }),
+					installInfo
+						? h(Row, { label: "Profile", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.profile) })
+						: null,
+					installInfo
+						? h(Row, { label: "Client", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.client) })
+						: null
+				)
 			);
 		}
 
@@ -2317,6 +3029,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			explorerStore.init();
 			// Custom window title bar (native only).
 			if (hasTauri() && typeof document !== "undefined") installTitlebar();
+			// Window title follows the active chat (native only): the
+			// sessions service's current session drives the native title.
+			if (hasTauri() && typeof document !== "undefined") watchDocumentTitle(ctx);
 			// On-screen error badge (native only): makes webview runtime
 			// errors visible instead of silent.
 			if (hasTauri() && typeof document !== "undefined") installErrorBadge();
@@ -2351,7 +3066,10 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				order: 20,
 				label: () => "dsh-desktop",
 				locale: NS,
-				inject: () => ({ openWorkspace: (path) => openWorkspace(ctx, path) })
+				inject: () => ({
+					openWorkspace: (path) => openWorkspace(ctx, path),
+					workspaces: ctx.workspaces
+				})
 			}, DesktopSection));
 			// The explorer panel: docked right, Files/Preview tabs. Registered
 			// into the shell overlay (the app's full-frame overlay layer) once
@@ -2396,6 +3114,17 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 		//#endregion
 		exports.apply = apply;
 		exports.inject = inject;
+		// Test hook: the pure preview helpers and the pure settings layout,
+		// exercised by the smoke test without a webview (inert for the shell,
+		// which only reads apply/inject).
+		exports.previewHelpers = {
+			rewriteMarkdownImages,
+			extractToc,
+			resolveLocalPath,
+			normalizeWebUrl,
+			dshdFileUrl
+		};
+		exports.desktopSettingsView = DesktopSettingsView;
 		return module.exports;
 	}
 });

@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-shell",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "The dsh desktop profile bundle: opens the native Tauri render client on the served web surface and adds the dsh-desktop settings tab to the web UI.",
   "private": false,
   "type": "module",

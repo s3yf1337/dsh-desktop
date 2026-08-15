@@ -71,6 +71,8 @@ pub struct FileContent {
 	pub path: String,
 	pub name: String,
 	pub size: u64,
+	/// Last modification, ms since epoch (the preview's auto-refresh input).
+	pub modified_ms: Option<u64>,
 	/// `text/plain`-ish MIME for images, else `application/octet-stream`.
 	pub mime: String,
 	/// `utf8` (text), `base64` (image), or `binary` (everything else).
@@ -117,6 +119,7 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 				path,
 				name,
 				size,
+				modified_ms: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64),
 				mime: mime.to_string(),
 				encoding: "binary".into(),
 				content: String::new(),
@@ -125,7 +128,8 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 		}
 		let data = std::fs::read(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
 		let content = base64_encode(&data);
-		return Ok(FileContent { path, name, size, mime: mime.to_string(), encoding: "base64".into(), content, truncated: false });
+		let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+		return Ok(FileContent { path, name, size, modified_ms: modified, mime: mime.to_string(), encoding: "base64".into(), content, truncated: false });
 	}
 
 	// Binary sniff: NUL in the first 8 KiB means "no text preview". Reading the
@@ -141,10 +145,12 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 	}
 
 	if data.iter().take(8192).any(|&b| b == 0) {
+		let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
 		return Ok(FileContent {
 			path,
 			name,
 			size,
+			modified_ms: modified,
 			mime: "application/octet-stream".into(),
 			encoding: "binary".into(),
 			content: String::new(),
@@ -159,11 +165,93 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 		path,
 		name,
 		size,
+		modified_ms: meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64),
 		mime: "text/plain".into(),
 		encoding: "utf8".into(),
 		content,
 		truncated,
 	})
+}
+
+/// Lightweight stat of one file: the preview panel polls this to auto-refresh
+/// when a file changes on disk (size or mtime moved).
+#[derive(Serialize, Debug)]
+pub struct FileStat {
+	pub size: u64,
+	/// Last modification, ms since epoch.
+	pub modified_ms: Option<u64>,
+}
+
+#[tauri::command]
+pub fn desktop_stat(path: String) -> Result<FileStat, String> {
+	let meta = std::fs::metadata(&path).map_err(|error| format!("cannot stat {path}: {error}"))?;
+	if meta.is_dir() {
+		return Err(format!("{path} is a directory"));
+	}
+	let modified = meta
+		.modified()
+		.ok()
+		.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+		.map(|d| d.as_millis() as u64);
+	Ok(FileStat { size: meta.len(), modified_ms: modified })
+}
+
+/// Hex dump of a binary file's head, so "no preview" files still get a useful
+/// view. Reads at most [`HEXDUMP_CAP`] bytes; `truncated` tells the UI the
+/// file continues beyond the dump. The text is pre-formatted lines
+/// `offset  hex bytes  |ascii|`, one per 16-byte row.
+#[derive(Serialize, Debug)]
+pub struct HexDump {
+	pub path: String,
+	pub name: String,
+	pub size: u64,
+	pub text: String,
+	/// The file was larger than the dump cap.
+	pub truncated: bool,
+}
+
+/// Bytes of a binary file shown as a hex dump (32 KiB = 2048 rows).
+const HEXDUMP_CAP: u64 = 32 << 10;
+
+#[tauri::command]
+pub fn desktop_hexdump(path: String) -> Result<HexDump, String> {
+	let file = std::path::PathBuf::from(&path);
+	let meta = std::fs::metadata(&file).map_err(|error| format!("cannot stat {path}: {error}"))?;
+	let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+	let size = meta.len();
+	let mut data = Vec::new();
+	{
+		use std::io::Read;
+		let handle = std::fs::File::open(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
+		handle
+			.take(HEXDUMP_CAP)
+			.read_to_end(&mut data)
+			.map_err(|error| format!("cannot read {path}: {error}"))?;
+	}
+	let mut text = String::with_capacity(data.len() * 4);
+	for (offset, chunk) in data.chunks(16).enumerate() {
+		use std::fmt::Write;
+		let _ = write!(text, "{offset:08x}  ");
+		for (i, byte) in chunk.iter().enumerate() {
+			let _ = write!(text, "{byte:02x} ");
+			if i == 7 {
+				text.push(' ');
+			}
+		}
+		for _ in chunk.len()..16 {
+			text.push_str("   ");
+			if chunk.len() <= 8 {
+				text.push(' ');
+			}
+		}
+		text.push_str(" |");
+		for byte in chunk {
+			let c = *byte;
+			text.push(if (0x20..0x7f).contains(&c) { c as char } else { '.' });
+		}
+		text.push_str("|\n");
+	}
+	Ok(HexDump { path, name, size, text, truncated: size > HEXDUMP_CAP })
 }
 
 /// Write (create or overwrite) one text file. Backs "new file", inline
@@ -368,6 +456,43 @@ mod tests {
 		assert_eq!(out.encoding, "binary");
 		assert!(out.truncated, "expected truncated for oversized image");
 		assert!(out.content.is_empty(), "image over the cap should not be read into memory");
+		rm(&path);
+	}
+
+	#[test]
+	fn stat_reports_size_and_mtime() {
+		let path = temp_file("stat.txt", b"hello");
+		let out = desktop_stat(path.to_string_lossy().into_owned()).expect("stat should succeed");
+		assert_eq!(out.size, 5);
+		assert!(out.modified_ms.is_some(), "mtime should be present");
+		rm(&path);
+	}
+
+	#[test]
+	fn stat_rejects_directories() {
+		let dir = std::env::temp_dir().join(format!("dsh-desktop-stat-dir-{}", std::process::id()));
+		let _ = std::fs::create_dir(&dir);
+		assert!(desktop_stat(dir.to_string_lossy().into_owned()).is_err(), "directories are not stat-able files");
+		let _ = std::fs::remove_dir(&dir);
+	}
+
+	#[test]
+	fn hexdump_formats_rows_and_marks_truncation() {
+		let bytes: Vec<u8> = (0..=31).collect(); // 32 bytes, two full rows
+		let path = temp_file("dump.bin", &bytes);
+		let out = desktop_hexdump(path.to_string_lossy().into_owned()).expect("hexdump should succeed");
+		assert!(!out.truncated);
+		assert!(out.text.starts_with("00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f  |"),
+			"first row malformed: {}", out.text.lines().next().unwrap_or(""));
+		assert!(out.text.contains("10 11 12 13 14 15 16 17  18 19 1a 1b 1c 1d 1e 1f"), "second row missing");
+		assert!(out.text.contains("|................|"), "ascii column malformed");
+		rm(&path);
+
+		let big = vec![0u8; (HEXDUMP_CAP + 1) as usize];
+		let path = temp_file("huge.bin", &big);
+		let out = desktop_hexdump(path.to_string_lossy().into_owned()).expect("hexdump should succeed");
+		assert!(out.truncated, "expected truncated for a file over the cap");
+		assert_eq!(out.text.lines().count() as u64, HEXDUMP_CAP / 16, "rows must match the cap");
 		rm(&path);
 	}
 }

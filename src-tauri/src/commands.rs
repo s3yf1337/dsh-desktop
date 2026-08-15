@@ -2,7 +2,7 @@
 //! section calls these via `window.__TAURI__.core.invoke`; every mutating
 //! command emits `desktop://state` so open tabs refresh live.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::DesktopState;
 use crate::AppState;
@@ -184,4 +184,21 @@ pub fn desktop_test_notification(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn desktop_is_directory(path: String) -> Result<bool, String> {
 	Ok(std::fs::metadata(&path).map(|meta| meta.is_dir()).unwrap_or(false))
+}
+
+/// Mirror the active chat's title (sent by the browser half, which reads it
+/// from the harness sessions service) into the native window title and the
+/// custom title bar, so the window follows the chat open right now instead
+/// of the last started agent. An empty title resets to the default.
+#[tauri::command]
+pub fn desktop_set_title(app: AppHandle, title: String) -> Result<(), String> {
+	let title = title.trim();
+	let title = if title.is_empty() { "DeepSeek Harness" } else { title };
+	if let Some(win) = app.get_webview_window("main") {
+		win.set_title(title).map_err(|error| error.to_string())?;
+	}
+	// The custom title bar renders its own caption; mirror the native title
+	// into the webview (the browser half updates its node from this event).
+	let _ = app.emit(crate::update::TITLE_EVENT, title);
+	Ok(())
 }
