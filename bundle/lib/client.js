@@ -2008,6 +2008,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			useEffect(() => {
 				if (!tauri) return;
 				let off;
+				let offProgress;
 				refresh();
 				window.__TAURI__.event
 					.listen(STATE_EVENT, (event) => setState(event.payload))
@@ -2017,6 +2018,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					.catch(() => {});
 				window.__TAURI__.event
 					.listen(UPDATE_PROGRESS_EVENT, (event) => setProgress(event.payload))
+					.then((unlisten) => {
+						offProgress = unlisten;
+					})
 					.catch(() => {});
 				window.__TAURI__.core
 					.invoke("desktop_install_info")
@@ -2024,6 +2028,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					.catch(() => {});
 				return () => {
 					if (off) off();
+					if (offProgress) offProgress();
 				};
 			}, [tauri, refresh]);
 
