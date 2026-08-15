@@ -17,11 +17,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            bin: dsh-desktop-shell-linux-x86_64
+            slug: linux-x86_64
+            bundles: deb
           - os: macos-latest
-            bin: dsh-desktop-shell-macos-aarch64
+            slug: macos-aarch64
+            bundles: app,dmg
           - os: windows-latest
-            bin: dsh-desktop-shell-windows-x86_64.exe
+            slug: windows-x86_64
+            bundles: nsis
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -42,31 +45,39 @@ jobs:
             libgtk-3-dev \
             patchelf
 
-      - name: Build client (cargo build --release)
-        working-directory: src-tauri
-        run: cargo build --release
+      - name: Install tauri-cli (prebuilt, fast)
+        run: npm install -g @tauri-apps/cli@^2
 
-      - name: Name the client binary per OS
+      - name: Build + bundle (${{ matrix.bundles }})
+        working-directory: src-tauri
+        run: tauri build --bundles ${{ matrix.bundles }}
+
+      # The update tarball: the raw client binary + the plugin bundle, named
+      # dsh-desktop-<tag>-<slug>.tar.gz so the app's one-click updater can
+      # find its platform package among the release assets.
+      - name: Pack the update tarball
         shell: bash
         run: |
-          cd src-tauri/target/release
-          if [ -f dsh-desktop-shell.exe ]; then
-            mv dsh-desktop-shell.exe "${{ matrix.bin }}"
-          else
-            mv dsh-desktop-shell "${{ matrix.bin }}"
-          fi
+          BIN=dsh-desktop-shell
+          [ "$RUNNER_OS" = "Windows" ] && BIN=dsh-desktop-shell.exe
+          tar -czf "dsh-desktop-${GITHUB_REF_NAME}-${{ matrix.slug }}.tar.gz" \
+            -C src-tauri/target/release "$BIN" \
+            -C ../../../ bundle
 
-      - name: Upload client binary
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.os }}
+          name: artifacts-${{ matrix.os }}
           if-no-files-found: error
-          path: src-tauri/target/release/${{ matrix.bin }}
+          path: |
+            src-tauri/target/release/bundle/**/*
+            dsh-desktop-*.tar.gz
 
-  # Publish exactly one release from one job: the build matrix only uploads
-  # binaries; this job downloads them, packs the plugin bundle, and creates
-  # the GitHub release (dsh-desktop is a harness profile/plugin — the client
-  # binary + the bundle are the artifacts, not OS installers).
+  # Publish exactly one release from one job: this job downloads the per-OS
+  # installers + update tarballs and creates the GitHub release. dsh-desktop
+  # is a harness profile/plugin, so a release ships both the OS installers
+  # (which install the plugin into dsh) and the raw tarballs the in-app
+  # one-click updater consumes.
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
@@ -76,19 +87,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pack the plugin bundle
-        run: tar -czf dsh-desktop-shell-bundle-${GITHUB_REF_NAME}.tgz bundle/
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: binary-*
+          pattern: artifacts-*
           merge-multiple: true
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*
-            dsh-desktop-shell-bundle-*.tgz
+          files: artifacts/**/*
           generate_release_notes: true

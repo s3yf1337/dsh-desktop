@@ -92,8 +92,7 @@ window.__ModuleLoader__.load({
 		//#region custom title bar (plain DOM, fixed to the viewport top)
 		const TITLEBAR_CSS = `
 #dshd-titlebar{position:fixed;top:0;left:0;right:0;height:${TITLEBAR_HEIGHT}px;z-index:9999;display:flex;align-items:center;justify-content:space-between;background:var(--dsw-alias-bg-base);border-bottom:1px solid var(--dsw-alias-border-l1);-webkit-app-region:drag;user-select:none;font-family:var(--dsw-font-family)}
-#dshd-titlebar .dshd-left{display:flex;align-items:center;gap:8px;padding-left:10px;min-width:0;height:100%}
-#dshd-titlebar .dshd-logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#1f6feb,#388bfd);display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;flex:none}
+#dshd-titlebar .dshd-left{display:flex;align-items:center;gap:8px;padding-left:12px;min-width:0;height:100%}
 #dshd-titlebar .dshd-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1}
 #dshd-titlebar .dshd-actions{display:flex;align-items:center;height:100%;-webkit-app-region:no-drag}
 #dshd-titlebar button{-webkit-app-region:no-drag;border:none;background:transparent;width:44px;height:100%;display:grid;place-items:center;cursor:default;color:var(--dsw-alias-label-secondary);padding:0}
@@ -144,7 +143,6 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 			bar.setAttribute("data-tauri-drag-region", "");
 			bar.innerHTML = `
 				<div class="dshd-left">
-					<div class="dshd-logo">DH</div>
 					<div class="dshd-title">DeepSeek Harness</div>
 				</div>
 				<div class="dshd-actions"></div>`;

@@ -11,9 +11,14 @@ native notifications, and close-to-tray behavior.
 ## Features
 
 - Runs the harness in its own native window with an app icon in the dock/taskbar.
+- Custom title bar (drag region, minimize/maximize/close) drawn by the web
+  surface, matching the app theme on every platform.
+- Right-hand explorer panel with **Files** and **Preview** tabs for browsing
+  the workspace and previewing text, code, and images.
 - Closing the window hides it to the tray; running agents keep working.
 - Native notifications on agent finish, error, and question events.
-- Update checks that only suggest a new version; updates are never forced.
+- One-click updates: download, apply, restart. Nothing is applied
+  automatically; background checks are opt-in (off by default).
 - Workspace selection via the OS folder dialog, or drag-and-drop a folder into
   the window.
 - A **dsh-desktop** tab inside the harness Settings for desktop preferences.
@@ -27,6 +32,10 @@ git clone https://github.com/s3yf1337/dsh-desktop && cd dsh-desktop
 ./install.sh
 dsh-desktop
 ```
+
+Pre-built installers per platform (`.deb` on Linux, `.dmg` on macOS, NSIS
+`.exe` on Windows) are published on the
+[releases](https://github.com/s3yf1337/dsh-desktop/releases) page.
 
 Runs on Linux, macOS, and Windows.
 
@@ -58,6 +67,21 @@ pipes agent-lifecycle events to the client over a stdin control channel
 
 #### Install options
 
+**One installer per platform** (from the [releases](https://github.com/s3yf1337/dsh-desktop/releases)
+page): `.deb` on Linux, `.dmg` on macOS, `.exe` (NSIS) on Windows. The
+installer places the client binary and registers an app-menu entry; the first
+launch of the installed app bootstraps the plugin profile into dsh and opens
+the window. The client binary itself is also a plugin installer:
+
+```sh
+dsh-desktop-shell install            # bootstrap the profile + install client/launcher
+dsh-desktop-shell install --prefix /usr  # OS-package layout (menus under /usr/share)
+dsh-desktop-shell                    # same as install, then boot the profile
+dsh-desktop-shell --version
+```
+
+From source (Linux/macOS dev path), `install.sh` works as before:
+
 ```sh
 ./install.sh            # full bootstrap (builds the client if needed)
 ./install.sh --no-build # use an existing client binary, never build
@@ -69,20 +93,22 @@ no pnpm/registry needed), builds the client if missing, installs
 `dsh-desktop-shell` + the `dsh-desktop` launcher to `~/.local/bin`, installs
 the icon into the hicolor theme, and registers a desktop menu entry.
 Idempotent: re-running refreshes the bundle copy and never touches your
-profile's `cordis.patch.yml` user layer.
+profile's `cordis.patch.yml` user layer. The binary's own `install` mode is
+the cross-platform equivalent (it embeds the bundle, so one artifact installs
+everything).
 
 #### Release artifacts (CI-built)
 
-Every `v*` tag builds the client binary on all three platforms via GitHub
-Actions and publishes them as a release — plus a tarball of the plugin
-bundle:
+Every `v*` tag builds, bundles, and publishes per platform:
 
-- `dsh-desktop-shell-linux-x86_64`, `dsh-desktop-shell-macos-aarch64`,
-  `dsh-desktop-shell-windows-x86_64.exe` — the native render client
-- `dsh-desktop-shell-bundle-<tag>.tgz` — the `bundle/` plugin package
+- **Installers** — `DeepSeek Harness_<tag>_amd64.deb` (Linux),
+  `.dmg` + `.app` (macOS), NSIS `.exe` (Windows)
+- **Update tarballs** — `dsh-desktop-<tag>-linux-x86_64.tar.gz`,
+  `-macos-aarch64.tar.gz`, `-windows-x86_64.tar.gz` (client binary + `bundle/`)
 
-Drop the right binary in place (or let `install.sh` copy it with
-`--no-build`) and run the profile as usual.
+The in-app **one-click update** downloads its platform tarball, swaps the
+client binary, refreshes the plugin bundle, and restarts. Nothing is ever
+applied automatically; background checks are opt-in (off by default).
 
 #### Configuration
 
@@ -97,8 +123,14 @@ The native client honors:
 - `DSH_DESKTOP_BIN` — an explicit client binary path
 
 Client binary resolution in the bundle plugin: `config.bin` → `DSH_DESKTOP_BIN`
-→ `dsh-desktop-shell` on `PATH` → `~/.local/bin/dsh-desktop-shell`. With no
-binary found the harness still serves the web UI (degrades to browser use).
+→ `$DSH_HOME/bin/dsh-desktop-shell` → `dsh-desktop-shell` on `PATH` →
+`~/.local/bin/dsh-desktop-shell`. With no binary found the harness still
+serves the web UI (degrades to browser use).
+
+The window is frameless; the web surface draws the title bar (drag region,
+minimize/maximize/close, resize edges) and the right-hand explorer panel
+(Files/Preview tabs). The shell exits with code 0 when the user is done and
+code 11 after a one-click update (the plugin relaunches the profile).
 
 #### Layout
 
@@ -106,23 +138,26 @@ binary found the harness still serves the web UI (degrades to browser use).
 bundle/                  the dsh-desktop-shell plugin package (bundle contract)
   cordis.patch.yml       inserts the desktop-shell row
   lib/index.js           spawn/watcher plugin (webServer, appExit, stdin control)
-  lib/client.js          browser half: the "dsh-desktop" settings tab + drag&drop
+  lib/client.js          browser half: title bar, explorer panel, settings tab
 dist/index.html          loading page shown while the WebView boots
 dsh-desktop              launcher wrapper: exec dsh --profile desktop
 install.sh               one-command bootstrap (profile + client + icons + menu entry)
 src-tauri/               the native render client (the actual app)
   src/main.rs
-  src/lib.rs             URL parsing, navigate, show, exit on close; tray,
-                         close-to-tray, single-instance, stdin control channel
+  src/lib.rs             arg dispatch (url | install | no-arg), frameless window,
+                         tray, close-to-tray, single-instance, stdin control
+  src/install.rs         plugin installer mode (embedded bundle, cross-platform)
+  src/fs.rs              explorer commands (list dir, read file, home, parent)
   src/commands.rs        desktop_* commands the settings tab invokes
   src/settings.rs        persisted desktop preferences (dsh-desktop.json)
   src/tray.rs            tray icon + menu (show/hide, updates, quit)
-  src/update.rs          update orchestration (check, emit, notify, loop)
-  src/updater.rs         GitHub releases API client (suggest-only)
+  src/update.rs          update orchestration (check, emit, notify, apply, restart)
+  src/updater.rs         GitHub releases API client (assets, suggest + one-click)
   src/log.rs             file + stderr logging (dsh-desktop.log)
   Cargo.toml
   tauri.conf.json
   capabilities/default.json
+test/client-smoke.mjs    renders client.js (title bar module + explorer + settings)
 ```
 
 The installed profile lives at `$DSH_HOME/profiles/desktop/`:

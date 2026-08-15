@@ -11,3 +11,4 @@ node_modules/
 *.log
 pnpm-dir/
 .DS_Store
+.dsh-vision-toolkit/
