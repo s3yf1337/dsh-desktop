@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-write-file"
+description = "Enables the desktop_write_file command without any pre-configured scope."
+commands.allow = ["desktop_write_file"]
+
+[[permission]]
+identifier = "deny-desktop-write-file"
+description = "Denies the desktop_write_file command without any pre-configured scope."
+commands.deny = ["desktop_write_file"]

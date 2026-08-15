@@ -13,8 +13,17 @@ native notifications, and close-to-tray behavior.
 - Runs the harness in its own native window with an app icon in the dock/taskbar.
 - Custom title bar (drag region, minimize/maximize/close) drawn by the web
   surface, matching the app theme on every platform.
-- Right-hand explorer panel with **Files** and **Preview** tabs for browsing
-  the workspace and previewing text, code, and images.
+- Right-hand explorer panel — a real file manager: browse any folder (not
+  just the workspace) with breadcrumbs, back/forward, name filter and
+  recursive search, sort by name/size/date; right-click or keyboard
+  (F2 rename, Del to trash, arrows) to create, rename, copy, cut, paste,
+  delete, open externally; files changed or created since your last look
+  are marked live (auto-refresh). **Preview** tab shows text, code, and
+  images (1 MiB / 8 MiB caps).
+- The panel is wired into the harness: right-click a file → *Send path to
+  agent* inserts its (workspace-relative) path into the composer, images
+  can be attached to a message, and the workspace picker (hero + sidebar +
+  settings) is the panel in "choose a folder" mode instead of an OS dialog.
 - Closing the window hides it to the tray; running agents keep working.
 - Native notifications on agent finish, error, and question events.
 - One-click updates: download, apply, restart. Nothing is applied

@@ -32,11 +32,28 @@ window.__ModuleLoader__.load({
 			IconCodeOutline16,
 			IconDataOutline16,
 			IconSearchOutline16,
-			IconPanelLeftOutline16
+			IconPanelLeftOutline16,
+			Menu,
+			Modal,
+			writeClipboard,
+			IconPlusOutline16,
+			IconCheckOutline14,
+			IconCopyOutline16,
+			IconTrashOutline16,
+			IconEditOutline16,
+			IconChevronUpOutline14,
+			IconPaperclipOutline16,
+			IconRightUpOutline14,
+			IconLinkOutline16,
+			IconSendOutline14,
+			IconFolderClose16
 		} = _deepseek_ai_dsh_client_ui_primitives;
 
 		const NS = "desktopShell";
-		const inject = ["slots", "workspaces"];
+		// Declared services: cordis' tracker proxy throws on any ctx access to
+		// an undeclared service, so every service the panel touches at render
+		// time (workspaces, sessions, conversation) must be listed here.
+		const inject = ["slots", "workspaces", "sessions", "conversation"];
 
 		const STATE_EVENT = "desktop://state";
 		const UPDATE_PROGRESS_EVENT = "desktop://update-progress";
@@ -67,6 +84,10 @@ window.__ModuleLoader__.load({
 			open: false,
 			tab: "files",
 			width: EXPLORER_DEFAULT_WIDTH,
+			/** Active workspace-pick flow: {onPicked, onCancel, onError} (set by
+			* the harness directory-flow occupants or the settings tab). Non-null
+			* switches the panel into "choose a folder" mode. */
+			pick: null,
 			listeners: new Set(),
 			init() {
 				if (typeof localStorage === "undefined") return;
@@ -78,6 +99,25 @@ window.__ModuleLoader__.load({
 			setOpen(open) {
 				this.open = !!open;
 				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.open", this.open ? "1" : "0");
+				// Closing the panel while a pick flow is active cancels it.
+				if (!this.open && this.pick !== null) {
+					const owner = this.pick;
+					this.pick = null;
+					this.notify();
+					if (typeof owner.onCancel === "function") owner.onCancel();
+					return;
+				}
+				this.notify();
+			},
+			/** Enter pick mode (or replace the current flow owner). */
+			setPick(owner) {
+				this.pick = owner || null;
+				this.notify();
+			},
+			/** Leave pick mode without notifying the flow owner. */
+			clearPick() {
+				if (this.pick === null) return;
+				this.pick = null;
 				this.notify();
 			},
 			toggle() {
@@ -348,13 +388,137 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				: date.toLocaleDateString([], { month: "short", day: "numeric" });
 		}
 
-		/**
-		* The right-hand explorer panel. Rendered into the `shell.overlay` slot
-		* (the app's full-frame overlay layer), docked to the right edge below
-		* the title bar. Two tabs — Files and Preview — with exactly one active
-		* at a time, and a close button that hides the whole panel.
-		*/
-		function ExplorerPanel({ workspaces, close }) {
+		// ── small path helpers (paths stay opaque native strings; only the
+		//    last segment and the separator-joined prefix are ever derived) ──
+		function joinPath(dir, name) {
+			if (!dir) return name;
+			return dir.endsWith("/") || dir.endsWith("\\") ? dir + name : dir + "/" + name;
+		}
+
+		function baseName(path) {
+			const parts = String(path || "").split(/[\\/]/);
+			return parts[parts.length - 1] || "";
+		}
+
+		function pathSegments(path) {
+			const raw = String(path || "");
+			if (raw === "") return [];
+			const parts = raw.split(/[\\/]/).filter((part) => part !== "");
+			const out = [];
+			let acc = raw.startsWith("/") ? "/" : "";
+			for (const part of parts) {
+				acc = acc === "" ? part : acc === "/" ? "/" + part : acc + "/" + part;
+				out.push({ name: part, path: acc });
+			}
+			return out;
+		}
+
+		function isImageName(name) {
+			return /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i.test(name || "");
+		}
+
+		function errText(caught) {
+			return caught && typeof caught === "object" && caught.message ? caught.message : String(caught);
+		}
+
+		/** The path of `path` relative to `root`, when it lives inside `root`. */
+		function relativeTo(root, path) {
+			const r = String(root || "").replace(/[\\/]+$/, "");
+			const p = String(path || "");
+			if (r !== "" && p.startsWith(r + "/")) return p.slice(r.length + 1);
+			if (r !== "" && p.startsWith(r + "\\")) return p.slice(r.length + 1);
+			return p;
+		}
+
+		// ── composer bridge (А): the panel writes into the active session's
+		//    draft through the sessions store's input standard-kit, which
+		//    ui-conversation publishes per session as `props.inputActions`
+		//    (setDraft/addImages/…) and `hooks.input` (the live input state). ──
+		function composerSession(sessions) {
+			// The input standard-kit of the current session is published on
+			// `sessions.currentProvideInfo` (a snapshot store of
+			// {sessionId, hooks: {input}, props: {inputActions}}).
+			if (!sessions || typeof sessions.currentProvideInfo?.getSnapshot !== "function") return null;
+			let info = null;
+			try {
+				info = sessions.currentProvideInfo.getSnapshot();
+			} catch {
+				return null;
+			}
+			const actions = info?.props?.inputActions;
+			const inputState = info?.hooks?.input;
+			if (!actions || typeof actions.setDraft !== "function") return null;
+			return { sessionId: info?.sessionId, actions, inputState };
+		}
+
+		function focusComposer() {
+			if (typeof document === "undefined") return;
+			const seat = document.querySelector("[data-composer-seat]");
+			const editable = seat?.querySelector('[contenteditable="true"], textarea, input:not([type="hidden"])');
+			if (editable && typeof editable.focus === "function") editable.focus();
+		}
+
+		/** Append `path` to the active session's draft. Returns false when no
+		* composer is available. */
+		function insertPathIntoComposer(sessions, path) {
+			const session = composerSession(sessions);
+			if (!session) return false;
+			let draft = "";
+			try {
+				draft = session.inputState?.getSnapshot()?.draft ?? "";
+			} catch {
+				// no live state — the path alone still lands in the draft
+			}
+			const sep = draft && !draft.endsWith(" ") && !draft.endsWith("\n") ? " " : "";
+			session.actions.setDraft(draft + sep + path);
+			focusComposer();
+			return true;
+		}
+
+		function base64ToBytes(base64) {
+			if (typeof atob !== "function") return null;
+			const bin = atob(base64);
+			const bytes = new Uint8Array(bin.length);
+			for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+			return bytes;
+		}
+
+		/** Read an image natively and add it to the active session's draft
+		* images. Returns false when no composer or readable image exists. */
+		async function attachImageToComposer(sessions, conversation, path, name) {
+			if (!conversation || typeof conversation.createDraftImages !== "function") return false;
+			const session = composerSession(sessions);
+			if (!session) return false;
+			let content;
+			try {
+				content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
+			} catch {
+				return false;
+			}
+			if (!content || content.encoding !== "base64") return false;
+			const bytes = base64ToBytes(content.content);
+			if (bytes === null) return false;
+			let file;
+			try {
+				file = new File([bytes], name, { type: content.mime || "image/png" });
+			} catch {
+				return false;
+			}
+			try {
+				const ids = conversation.createDraftImages([file]).map((attachment) => attachment.id);
+				return session.actions.addImages(ids);
+			} catch {
+				return false;
+			}
+		}
+
+		/** The right-hand explorer panel: docked right, Files/Preview tabs, a
+		* context-menu-driven file manager over the native fs commands, and a
+		* "pick a folder" mode that serves as the harness's workspace picker.
+		* The panel is deliberately action-on-the-file: a right-click menu plus
+		* keyboard shortcuts, with only three persistent toolbar controls
+		* (back, search, new) beyond the path bar. */
+		function ExplorerPanel({ workspaces, sessions, conversation, close }) {
 			const [open, setOpen] = useState(explorerStore.open);
 			const [tab, setTab] = useState(explorerStore.tab);
 			const [cwd, setCwd] = useState(null);
@@ -367,35 +531,77 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			// The panel stays mounted for one transition after closing, so the
 			// docked space animates shut with the content instead of popping.
 			const [rendered, setRendered] = useState(explorerStore.open);
+			// ── v2 state ──
+			const [picking, setPicking] = useState(explorerStore.pick !== null);
+			const [menu, setMenu] = useState(null);            // {x, y, entry|null}
+			const [selected, setSelected] = useState(null);    // entry path
+			const [renaming, setRenaming] = useState(null);    // {path, name, is_dir}
+			const [creating, setCreating] = useState(null);    // {kind, name}
+			const [filterOpen, setFilterOpen] = useState(false);
+			const [filter, setFilter] = useState("");
+			const [search, setSearch] = useState(null);        // {query, items}
+			const [confirmDelete, setConfirmDelete] = useState(null);
+			const [history, setHistory] = useState([]);
+			const [histIndex, setHistIndex] = useState(-1);
+			const [prevSnapshot, setPrevSnapshot] = useState(null); // Map path → {m, s}
+			const [sort, setSort] = useState(() => {
+				try {
+					return localStorage.getItem("dshd.explorer.sort") || "name";
+				} catch {
+					return "name";
+				}
+			});
+			const [showHidden, setShowHidden] = useState(() => {
+				try {
+					return localStorage.getItem("dshd.explorer.hidden") === "1";
+				} catch {
+					return false;
+				}
+			});
+			const [clip, setClip] = useState(null);            // {op, paths}
+			const [chipOpen, setChipOpen] = useState(false);
+			const [chipRect, setChipRect] = useState(null);
+			const scrollRef = useRef(null);
+			const filterRef = useRef(null);
+			const crumbScrollRef = useRef(null);
+			// Poll-loop mirrors (the interval must not re-arm per keystroke).
+			const busyRef = useRef(false); busyRef.current = busy;
+			const cwdRef = useRef(null); cwdRef.current = cwd;
+			const menuRef = useRef(null); menuRef.current = menu;
+			const renamingRef = useRef(null); renamingRef.current = renaming;
+			const creatingRef = useRef(null); creatingRef.current = creating;
+			const searchRef = useRef(null); searchRef.current = search;
+			const prevRef = useRef(null); prevRef.current = prevSnapshot;
 
 			useEffect(() => explorerStore.subscribe(() => {
 				setOpen(explorerStore.open);
 				setTab(explorerStore.tab);
+				setPicking(explorerStore.pick !== null);
 			}), []);
 
-			// Dock/un-dock exactly like the app's own columns: the panel's
-			// width and the frame's reserved space both transition with the
-			// app's tokens (--ds-transition-duration-slow / --ds-ease-in-out),
-			// and the content fades in like the sidebar's wide-in keyframes.
+			// Dock/un-dock: the panel width lives in React state (never in
+			// imperative DOM mutations — a ref race between the open effect
+			// and the first render of the panel element used to strand the
+			// width at 0), and the CSS transition animates the change. The
+			// frame's reserved space joins the same transition tokens.
+			const [panelWidth, setPanelWidth] = useState(0);
+			const [dragging, setDragging] = useState(false);
 			useEffect(() => {
-				const panel = panelRef.current;
 				if (open) {
 					setRendered(true);
 					syncExplorerLayout(explorerStore.width);
-					if (panel) panel.style.width = "0px";
-					const raf = requestAnimationFrame(() => {
-						if (panelRef.current) panelRef.current.style.width = `${explorerStore.width}px`;
-					});
+					const raf = requestAnimationFrame(() => setPanelWidth(explorerStore.width));
 					return () => cancelAnimationFrame(raf);
 				}
-				if (panel) panel.style.width = "0px";
+				setPanelWidth(0);
 				syncExplorerLayout(0);
 				const timer = setTimeout(() => setRendered(false), 360);
 				return () => clearTimeout(timer);
 			}, [open]);
 
 			// Resize: drag the handle → live-update the panel width + frame
-			// padding during the drag, commit to the store on release.
+			// padding during the drag (transition off while dragging), commit
+			// to the store on release.
 			const startResize = (event) => {
 				event.preventDefault();
 				event.stopPropagation();
@@ -405,14 +611,14 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				let lastWidth = startWidth;
 				handle.classList.add("dragging");
 				document.body.classList.add("dshd-resizing");
-				if (panelRef.current) panelRef.current.style.transition = "none";
+				setDragging(true);
 				const onMove = (moveEvent) => {
 					const next = Math.min(
 						EXPLORER_MAX_WIDTH,
 						Math.max(EXPLORER_MIN_WIDTH, startWidth + (startX - moveEvent.clientX))
 					);
 					lastWidth = next;
-					if (panelRef.current) panelRef.current.style.width = `${next}px`;
+					setPanelWidth(next);
 					syncExplorerLayout(next);
 				};
 				const onUp = () => {
@@ -421,10 +627,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					handle.removeEventListener("pointermove", onMove);
 					handle.removeEventListener("pointerup", onUp);
 					handle.removeEventListener("pointercancel", onUp);
-					if (panelRef.current) {
-						panelRef.current.style.transition =
-							"width var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
-					}
+					setDragging(false);
 					explorerStore.setWidth(lastWidth);
 				};
 				handle.setPointerCapture(event.pointerId);
@@ -433,7 +636,8 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				handle.addEventListener("pointercancel", onUp);
 			};
 
-			// Initial root: the current workspace directory, else home.
+			// Initial root: the remembered directory, else the current
+			// workspace directory, else home.
 			const root = useMemo(() => {
 				if (workspaces && typeof workspaces.list === "object" && workspaces.list !== null) {
 					try {
@@ -449,40 +653,176 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				return null;
 			}, [workspaces]);
 
+			const workspaceSnapshot = useMemo(() => {
+				if (!workspaces || typeof workspaces.list?.getSnapshot !== "function") return null;
+				try {
+					return workspaces.list.getSnapshot();
+				} catch {
+					return null;
+				}
+			}, [workspaces]);
+
+			const sessionSnapshot = useMemo(() => {
+				if (!sessions || typeof sessions.list?.getSnapshot !== "function") return null;
+				try {
+					return sessions.list.getSnapshot();
+				} catch {
+					return null;
+				}
+			}, [sessions]);
+
+			const workspaceView = (item) => {
+				if (!item) return null;
+				try {
+					let view = typeof item.getSnapshot === "function" ? item.getSnapshot().view : null;
+					if (!view) view = item.view;
+					// Browser-view-shaped item: the fields sit on the item itself.
+					if (!view && (typeof item.path === "string" || typeof item.workspaceId === "string")) view = item;
+					return view && typeof view === "object" ? view : null;
+				} catch {
+					return null;
+				}
+			};
+			const workspaceTitleOf = (item) => {
+				const view = workspaceView(item);
+				if (!view) return null;
+				if (view.title) return view.title;
+				if (item && item.title) return item.title;
+				return typeof view.path === "string" && view.path !== "" ? baseName(view.path) : null;
+			};
+			const workspaceSessionIdsOf = (item) => {
+				if (Array.isArray(item?.sessionIds)) return item.sessionIds;
+				const view = workspaceView(item);
+				return Array.isArray(view?.sessionIds) ? view.sessionIds : [];
+			};
+
+			// The workspace the active session belongs to, else the first one.
+			const currentWorkspace = useMemo(() => {
+				const items = workspaceSnapshot?.items || [];
+				if (items.length === 0) return null;
+				const current = sessionSnapshot?.current;
+				if (current !== void 0) {
+					const found = items.find((w) => workspaceSessionIdsOf(w).includes(current));
+					if (found) return found;
+				}
+				return items[0];
+			}, [workspaceSnapshot, sessionSnapshot]);
+
+			const currentWorkspacePath = useMemo(() => {
+				const view = workspaceView(currentWorkspace);
+				return view && typeof view.path === "string" && view.path !== "" ? view.path : null;
+			}, [currentWorkspace]);
+
+			const currentWorkspaceTitle = useMemo(() => {
+				return workspaceTitleOf(currentWorkspace) || (currentWorkspacePath ? baseName(currentWorkspacePath) : "Workspace");
+			}, [currentWorkspace, currentWorkspacePath]);
+
 			const loadDir = useCallback(async (path) => {
 				setBusy(true);
 				setError(null);
 				try {
 					const list = await window.__TAURI__.core.invoke("desktop_list_dir", { path });
+					// A fresh directory starts an unmarked baseline; refreshing
+					// the same directory marks what changed since last view.
+					const prev = path === cwdRef.current ? prevRef.current : null;
+					const next = new Map();
+					const marked = list.map((entry) => {
+						next.set(entry.path, { m: entry.modified_ms, s: entry.size });
+						if (!prev) return { ...entry, fresh: false, changed: false };
+						const old = prev.get(entry.path);
+						if (!old) return { ...entry, fresh: true, changed: false };
+						return { ...entry, fresh: false, changed: old.m !== entry.modified_ms || old.s !== entry.size };
+					});
+					setPrevSnapshot(next);
 					setCwd(path);
-					setEntries(list);
+					setEntries(marked);
+					if (path !== cwdRef.current) {
+						// Navigating elsewhere: drop the previous search and
+						// filter so the newly opened folder is not re-filtered.
+						if (searchRef.current) setSearch(null);
+						if (filterRef.current) {
+							setFilter("");
+							setFilterOpen(false);
+						}
+					}
+					try {
+						localStorage.setItem("dshd.explorer.root", path);
+					} catch {
+						// remember-root is best-effort
+					}
+					return true;
 				} catch (caught) {
-					setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
+					setError(errText(caught));
 					setEntries(null);
+					return false;
 				} finally {
 					setBusy(false);
 				}
 			}, []);
 
-			// (Re)open the panel → load the current directory.
+			// History-aware navigation (back/forward stack, capped at 100).
+			// Right-anchored path: after every directory change (and panel
+			// resize) pin the crumb scroll to the right edge, so the current
+			// folder stays visible even for long paths; scrolling left
+			// reveals the root part.
+			useEffect(() => {
+				const el = crumbScrollRef.current;
+				if (el) el.scrollLeft = el.scrollWidth;
+			}, [cwd, panelWidth]);
+
+			const navigate = useCallback((path) => {
+				setHistory((hist) => [...hist.slice(0, histIndex + 1), path].slice(-100));
+				setHistIndex((index) => Math.min(index + 1, 99));
+				loadDir(path);
+			}, [histIndex, loadDir]);
+
+			const goBack = useCallback(() => {
+				if (histIndex <= 0 || history.length === 0) return;
+				const target = history[histIndex - 1];
+				setHistIndex(histIndex - 1);
+				loadDir(target);
+			}, [histIndex, history, loadDir]);
+
+			const goForward = useCallback(() => {
+				if (histIndex >= history.length - 1) return;
+				const target = history[histIndex + 1];
+				setHistIndex(histIndex + 1);
+				loadDir(target);
+			}, [histIndex, history, loadDir]);
+
+			// (Re)open the panel → load the remembered directory, falling back
+			// through the workspace root to home when it is gone.
 			useEffect(() => {
 				if (!open) return;
 				if (cwd !== null) {
 					loadDir(cwd);
 					return;
 				}
-				if (root !== null) {
-					loadDir(root);
-					return;
+				const candidates = [];
+				let saved = null;
+				try {
+					saved = localStorage.getItem("dshd.explorer.root");
+				} catch {
+					saved = null;
 				}
-				setBusy(true);
-				window.__TAURI__.core
-					.invoke("desktop_home_dir")
-					.then((home) => loadDir(home))
-					.catch((caught) => {
-						setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
-						setBusy(false);
-					});
+				if (saved !== null && saved !== "") candidates.push(saved);
+				if (root !== null) candidates.push(root);
+				const tryNext = async (index) => {
+					if (index >= candidates.length) {
+						setBusy(true);
+						try {
+							const home = await window.__TAURI__.core.invoke("desktop_home_dir");
+							await loadDir(home);
+						} catch (caught) {
+							setError(errText(caught));
+							setBusy(false);
+						}
+						return;
+					}
+					const ok = await loadDir(candidates[index]);
+					if (!ok) tryNext(index + 1);
+				};
+				tryNext(0);
 			}, [open, root, cwd, loadDir]);
 
 			const openFile = useCallback(async (path, name) => {
@@ -493,7 +833,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					const content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
 					setPreview({ path, name, loading: false, ...content });
 				} catch (caught) {
-					setPreview({ path, name, loading: false, failed: true, error: caught && typeof caught === "object" && caught.message ? caught.message : String(caught) });
+					setPreview({ path, name, loading: false, failed: true, error: errText(caught) });
 				}
 			}, []);
 
@@ -501,11 +841,413 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				if (!cwd) return;
 				try {
 					const parent = await window.__TAURI__.core.invoke("desktop_parent_dir", { path: cwd });
-					if (typeof parent === "string") loadDir(parent);
+					if (typeof parent === "string") navigate(parent);
 				} catch (caught) {
-					setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
+					setError(errText(caught));
 				}
-			}, [cwd, loadDir]);
+			}, [cwd, navigate]);
+
+			const run = useCallback(async (command, args) => {
+				try {
+					await window.__TAURI__.core.invoke(command, args);
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			}, []);
+
+			// Live refresh (Г): while the panel shows the file list, quietly
+			// re-list the current directory every 2 s and mark what changed.
+			useEffect(() => {
+				if (!open || picking || tab !== "files") return;
+				const timer = setInterval(() => {
+					if (typeof document !== "undefined" && document.hidden) return;
+					if (busyRef.current || menuRef.current || renamingRef.current || creatingRef.current) return;
+					if (cwdRef.current === null) return;
+					loadDir(cwdRef.current);
+				}, 2000);
+				return () => clearInterval(timer);
+			}, [open, picking, tab, loadDir]);
+
+			const runSearch = useCallback(async () => {
+				const query = filter.trim();
+				if (!query || !cwd) return;
+				setBusy(true);
+				setError(null);
+				try {
+					const items = await window.__TAURI__.core.invoke("desktop_search_names", { root: cwd, query });
+					setSearch({ query, items: Array.isArray(items) ? items : [] });
+				} catch (caught) {
+					setError(errText(caught));
+				} finally {
+					setBusy(false);
+				}
+			}, [filter, cwd]);
+
+			// Focus the filter input when it opens.
+			useEffect(() => {
+				if (filterOpen) filterRef.current?.focus();
+			}, [filterOpen]);
+
+			const commitRenameValue = async (value) => {
+				if (!renaming) return;
+				const name = value.trim();
+				const current = baseName(renaming.path);
+				if (!name || name === current) {
+					setRenaming(null);
+					return;
+				}
+				try {
+					await window.__TAURI__.core.invoke("desktop_rename", { path: renaming.path, newName: name });
+					setRenaming(null);
+					loadDir(cwd);
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			};
+
+			const commitCreateValue = async (value) => {
+				if (!creating || !cwd) return;
+				const name = value.trim();
+				if (!name) {
+					setCreating(null);
+					return;
+				}
+				const path = joinPath(cwd, name);
+				try {
+					if (creating.kind === "dir") {
+						await window.__TAURI__.core.invoke("desktop_create_dir", { path });
+					} else {
+						await window.__TAURI__.core.invoke("desktop_write_file", { path, content: "" });
+					}
+					setCreating(null);
+					loadDir(cwd);
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			};
+
+			const commitDelete = async () => {
+				if (!confirmDelete) return;
+				const entry = confirmDelete;
+				setConfirmDelete(null);
+				try {
+					await window.__TAURI__.core.invoke("desktop_delete", { path: entry.path });
+					if (selected === entry.path) setSelected(null);
+					loadDir(cwd);
+				} catch (caught) {
+					setError(errText(caught));
+				}
+			};
+
+			const pasteInto = useCallback(async (targetDir) => {
+				if (!clip || !targetDir) return;
+				const op = clip.op;
+				setBusy(true);
+				setError(null);
+				try {
+					for (const src of clip.paths) {
+						if (op === "cut") {
+							await window.__TAURI__.core.invoke("desktop_move", { src, destDir: targetDir });
+						} else {
+							await window.__TAURI__.core.invoke("desktop_copy", { src, destDir: targetDir });
+						}
+					}
+					if (op === "cut") setClip(null);
+					loadDir(targetDir);
+				} catch (caught) {
+					setError(errText(caught));
+				} finally {
+					setBusy(false);
+				}
+			}, [clip, loadDir]);
+
+			// ── pick mode (Е): "Select this folder" completes the flow ──
+			const cancelPick = useCallback(() => {
+				const owner = explorerStore.pick;
+				if (owner && typeof owner.onCancel === "function") owner.onCancel();
+				explorerStore.clearPick();
+			}, []);
+
+			const selectPick = useCallback(async () => {
+				const owner = explorerStore.pick;
+				if (!owner || !cwd || busy) return;
+				setBusy(true);
+				setError(null);
+				try {
+					await owner.onPicked(cwd);
+					explorerStore.clearPick();
+					explorerStore.setOpen(false);
+				} catch (caught) {
+					setError(errText(caught));
+				} finally {
+					setBusy(false);
+				}
+			}, [cwd, busy]);
+
+			// ── context menu ──
+			const buildMenuItems = (entry) => {
+				const items = [];
+				if (entry) {
+					items.push({ id: "open", label: entry.is_dir ? "Open" : "Preview", icon: h(entry.is_dir ? IconFolderOpen16 : IconCodeOutline16, {}) });
+					items.push({ id: "open-ext", label: "Open externally", icon: h(IconRightUpOutline14, {}) });
+					items.push({ type: "separator" });
+					items.push({ id: "copy-path", label: "Copy path", icon: h(IconLinkOutline16, {}) });
+					items.push({ id: "send-path", label: "Send path to agent", icon: h(IconSendOutline14, {}), disabled: !sessions });
+					if (!entry.is_dir && isImageName(entry.name)) {
+						items.push({ id: "attach-image", label: "Attach to message", icon: h(IconPaperclipOutline16, {}), disabled: !sessions });
+					}
+					items.push({ type: "separator" });
+					items.push({ id: "copy", label: "Copy", icon: h(IconCopyOutline16, {}) });
+					items.push({ id: "cut", label: "Cut" });
+					if (clip) {
+						items.push({ id: "paste", label: "Paste here" });
+					}
+					items.push({ type: "separator" });
+					items.push({ id: "rename", label: "Rename", icon: h(IconEditOutline16, {}) });
+					items.push({ id: "delete", label: "Move to trash", icon: h(IconTrashOutline16, {}) });
+				} else {
+					items.push({ id: "new-file", label: "New file", icon: h(IconPlusOutline16, {}) });
+					items.push({ id: "new-folder", label: "New folder", icon: h(IconFolderOpenOutline16, {}) });
+					items.push({ type: "separator" });
+					items.push({ id: "sort-name", label: "Sort by name" });
+					items.push({ id: "sort-size", label: "Sort by size" });
+					items.push({ id: "sort-date", label: "Sort by date" });
+					items.push({ id: "toggle-hidden", label: "Show hidden files", icon: showHidden ? h(IconCheckOutline14, {}) : void 0 });
+					if (clip) {
+						items.push({ id: "paste", label: `Paste into ${baseName(cwd)}` });
+					}
+					items.push({ type: "separator" });
+					items.push({ id: "refresh", label: "Refresh", icon: h(IconRefreshOutline14, {}) });
+				}
+				return items;
+			};
+
+			const openMenuAt = (event, entry) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setMenu({ x: event.clientX, y: event.clientY, entry });
+			};
+
+			// A real DOMRect-shaped anchor (left/top/right/bottom): the Menu
+			// placement reads r.right/r.bottom — a rect without them yields a
+			// NaN top and the list falls back to the top of the viewport.
+			const menuAnchorRect = useCallback(() => {
+				if (menu === null) return null;
+				return { left: menu.x, top: menu.y, right: menu.x, bottom: menu.y, width: 0, height: 0 };
+			}, [menu]);
+
+			const handleMenu = (id, entry) => {
+				switch (id) {
+					case "open":
+						if (entry.is_dir) navigate(entry.path);
+						else openFile(entry.path, entry.name);
+						break;
+					case "open-ext":
+						run("desktop_open_path", { path: entry.path });
+						break;
+					case "copy-path":
+						writeClipboard(entry.path);
+						break;
+					case "send-path":
+						if (!insertPathIntoComposer(sessions, relativeTo(currentWorkspacePath, entry.path))) {
+							setError("No active conversation to insert the path into.");
+						}
+						break;
+					case "attach-image":
+						attachImageToComposer(sessions, conversation, entry.path, entry.name).then((ok) => {
+							if (!ok) setError("Cannot attach the image: no active conversation or unreadable file.");
+						});
+						break;
+					case "copy":
+						setClip({ op: "copy", paths: [entry.path] });
+						break;
+					case "cut":
+						setClip({ op: "cut", paths: [entry.path] });
+						break;
+					case "paste":
+						pasteInto(entry && entry.is_dir ? entry.path : cwd);
+						break;
+					case "rename":
+						setRenaming({ path: entry.path, name: entry.name, is_dir: entry.is_dir });
+						break;
+					case "delete":
+						setConfirmDelete(entry);
+						break;
+					case "new-file":
+						setCreating({ kind: "file", name: "" });
+						break;
+					case "new-folder":
+						setCreating({ kind: "dir", name: "" });
+						break;
+					case "sort-name":
+					case "sort-size":
+					case "sort-date": {
+						const value = id.slice(5);
+						setSort(value);
+						try {
+							localStorage.setItem("dshd.explorer.sort", value);
+						} catch {
+							// best-effort
+						}
+						break;
+					}
+					case "toggle-hidden":
+						setShowHidden((value) => {
+							const next = !value;
+							try {
+								localStorage.setItem("dshd.explorer.hidden", next ? "1" : "0");
+							} catch {
+								// best-effort
+							}
+							return next;
+						});
+						break;
+					case "refresh":
+						if (cwd) loadDir(cwd);
+						break;
+				}
+			};
+
+			// ── workspace chip (Е) ──
+			const chipItems = (workspaceSnapshot?.items || []).map((item, index) => {
+				const view = workspaceView(item);
+				const path = view && typeof view.path === "string" ? view.path : "";
+				return { id: "ws-" + index, label: workspaceTitleOf(item) || (path ? baseName(path) : "Workspace"), icon: h(IconFolderClose16, {}) };
+			});
+			const chipSelected = currentWorkspace === null ? void 0 : "ws-" + (workspaceSnapshot?.items?.indexOf(currentWorkspace) ?? -1);
+
+			const openChipMenu = (event) => {
+				const rect = event.currentTarget.getBoundingClientRect();
+				setChipRect({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height });
+				setChipOpen(true);
+			};
+			const chipAnchorRect = useCallback(() => chipRect, [chipRect]);
+
+			const handleChip = (id) => {
+				setChipOpen(false);
+				if (id === "pick-folder") {
+					explorerStore.setPick({
+						onPicked: async (path) => {
+							await workspaces.create({ path });
+							navigate(path);
+						},
+						onCancel: () => {},
+						onError: (message) => setError(message)
+					});
+					explorerStore.setTab("files");
+					explorerStore.setOpen(true);
+					return;
+				}
+				const index = Number(String(id).slice(3));
+				const item = workspaceSnapshot?.items?.[index];
+				const view = workspaceView(item);
+				if (view && typeof view.path === "string" && view.path !== "") navigate(view.path);
+			};
+
+			// ── list derivation: filter → hide-dotfiles → sort (dirs first) ──
+			const visible = useMemo(() => {
+				if (search || !entries) return null;
+				let list = entries;
+				if (filter) {
+					const needle = filter.toLowerCase();
+					list = list.filter((entry) => entry.name.toLowerCase().includes(needle));
+				}
+				if (!showHidden) list = list.filter((entry) => !entry.name.startsWith("."));
+				const dirs = [];
+				const files = [];
+				for (const entry of list) (entry.is_dir ? dirs : files).push(entry);
+				const byName = (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+				const bySize = (a, b) => (b.size || 0) - (a.size || 0) || byName(a, b);
+				const byDate = (a, b) => (b.modified_ms || 0) - (a.modified_ms || 0) || byName(a, b);
+				const cmp = sort === "size" ? bySize : sort === "date" ? byDate : byName;
+				dirs.sort(cmp);
+				files.sort(cmp);
+				return [...dirs, ...files];
+			}, [entries, filter, showHidden, sort, search]);
+
+			const scrollToEntry = (path) => {
+				const container = scrollRef.current;
+				if (!container) return;
+				for (const node of container.querySelectorAll("[data-path]")) {
+					if (node.dataset.path === path) {
+						node.scrollIntoView({ block: "nearest" });
+						return;
+					}
+				}
+			};
+
+			const onKeyDown = (event) => {
+				if (menu || creating || renaming) return;
+				if (filterOpen && event.key !== "Escape" && event.key !== "Enter") return;
+				const list = search ? search.items : visible;
+				if (!list || list.length === 0) return;
+				const index = list.findIndex((entry) => entry.path === selected);
+				switch (event.key) {
+					case "ArrowDown":
+						event.preventDefault();
+						{
+							const next = list[Math.min(index + 1, list.length - 1)];
+							setSelected(next.path);
+							scrollToEntry(next.path);
+						}
+						break;
+					case "ArrowUp":
+						event.preventDefault();
+						{
+							const next = list[Math.max(index - 1, 0)];
+							setSelected(next.path);
+							scrollToEntry(next.path);
+						}
+						break;
+					case "Enter": {
+						event.preventDefault();
+						const entry = list.find((e) => e.path === selected);
+						if (entry) {
+							if (entry.is_dir) navigate(entry.path);
+							else openFile(entry.path, entry.name);
+						}
+						break;
+					}
+					case "Backspace":
+						event.preventDefault();
+						goUp();
+						break;
+					case "F2": {
+						event.preventDefault();
+						const entry = list.find((e) => e.path === selected);
+						if (entry) setRenaming({ path: entry.path, name: entry.name, is_dir: entry.is_dir });
+						break;
+					}
+					case "Delete": {
+						event.preventDefault();
+						const entry = list.find((e) => e.path === selected);
+						if (entry) setConfirmDelete(entry);
+						break;
+					}
+					case "Escape":
+						if (picking) cancelPick();
+						else if (search) setSearch(null);
+						else if (filter) setFilter("");
+						else setFilterOpen(false);
+						break;
+				}
+			};
+
+			const crumbs = useMemo(() => {
+				const segs = pathSegments(cwd);
+				if (segs.length === 0) return [];
+				if (currentWorkspacePath) {
+					const rootSegs = pathSegments(currentWorkspacePath);
+					if (rootSegs.length > 0 && (cwd === currentWorkspacePath || cwd.startsWith(currentWorkspacePath + "/"))) {
+						return [
+							{ name: currentWorkspaceTitle, path: currentWorkspacePath },
+							...segs.slice(rootSegs.length)
+						];
+					}
+				}
+				return segs;
+			}, [cwd, currentWorkspacePath, currentWorkspaceTitle]);
+
 
 			if (!rendered) return null;
 
@@ -518,7 +1260,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				top: 0,
 				right: 0,
 				bottom: 0,
-				width: 0,
+				width: panelWidth,
 				background: "var(--dsw-specific-sidebar-fill)",
 				borderLeft: "1px solid var(--dsw-alias-border-l1)",
 				overflow: "hidden",
@@ -529,7 +1271,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				color: "var(--dsw-alias-label-primary)",
 				fontFamily: "var(--dsw-font-family)",
 				fontSize: 14,
-				transition: "width var(--ds-transition-duration-slow) var(--ds-ease-in-out)",
+				transition: dragging
+					? "none"
+					: "width var(--ds-transition-duration-slow) var(--ds-ease-in-out)",
 				willChange: "width",
 				"--dsh-scrollbar-thumb": "var(--dsw-alias-scrollbar-bg-l2)",
 				"--dsh-scrollbar-thumb-hover": "var(--dsw-alias-scrollbar-hover-l2)"
@@ -590,17 +1334,210 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				opacity: disabled ? 0.5 : 1,
 				cursor: disabled ? "default" : "pointer"
 			});
+			const pathRowStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 2,
+				padding: "0 0 6px",
+				flex: "none",
+				minWidth: 0
+			};
+			const crumbStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 1,
+				flex: 1,
+				minWidth: 0,
+				overflowX: "auto",
+				scrollbarWidth: "none"
+			};
+			const crumbButtonStyle = {
+				border: "none",
+				background: "transparent",
+				color: "var(--dsw-alias-label-tertiary)",
+				fontSize: 12,
+				fontFamily: "var(--ds-font-family-code, monospace)",
+				padding: "2px 4px",
+				borderRadius: 6,
+				cursor: "pointer",
+				whiteSpace: "nowrap",
+				maxWidth: 140,
+				overflow: "hidden",
+				textOverflow: "ellipsis",
+				flex: "none"
+			};
+			const crumbCurrentStyle = {
+				...crumbButtonStyle,
+				color: "var(--dsw-alias-label-secondary)",
+				cursor: "default",
+				fontWeight: 600
+			};
+			const chipStyle = {
+				...roundButton,
+				width: "auto",
+				height: 26,
+				borderRadius: 13,
+				padding: "0 10px",
+				display: "flex",
+				alignItems: "center",
+				gap: 5,
+				fontSize: 12,
+				fontWeight: 500,
+				color: "var(--dsw-alias-label-secondary)",
+				maxWidth: 260,
+				flex: "none"
+			};
+			const filterRowStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 6,
+				padding: "0 4px 8px",
+				flex: "none"
+			};
+			const filterInputStyle = {
+				flex: 1,
+				minWidth: 0,
+				height: 26,
+				border: "1px solid var(--dsw-alias-border-l2)",
+				borderRadius: 8,
+				background: "transparent",
+				color: "var(--dsw-alias-label-primary)",
+				fontSize: 12,
+				padding: "0 8px",
+				outline: "none",
+				fontFamily: "inherit"
+			};
+			const rowStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 8,
+				width: "100%",
+				minHeight: 30,
+				border: "none",
+				background: "transparent",
+				borderRadius: 8,
+				padding: "2px 8px",
+				cursor: "pointer",
+				font: "inherit",
+				color: "var(--dsw-alias-label-primary)",
+				boxSizing: "border-box",
+				textAlign: "left"
+			};
+			const pickFooterStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 8,
+				padding: "10px 0 4px",
+				borderTop: "1px solid var(--dsw-alias-border-l1)",
+				flex: "none"
+			};
+			const statusBarStyle = {
+				display: "flex",
+				alignItems: "center",
+				gap: 8,
+				padding: "6px 0 2px",
+				borderTop: "1px solid var(--dsw-alias-border-l1)",
+				flex: "none"
+			};
 
-			return h("div", { ref: panelRef, className: "dshd-explorer-panel", style, "data-dshd-explorer": true },
+			const renderRow = (entry, index) => {
+				const isSelected = selected === entry.path;
+				const dimmed = clip && clip.op === "cut" && clip.paths.includes(entry.path);
+				const isRenaming = renaming !== null && renaming.path === entry.path;
+				return h("div", {
+					key: entry.path,
+					"data-path": entry.path,
+					role: "button",
+					tabIndex: -1,
+					title: entry.path,
+					style: {
+						...rowStyle,
+						opacity: dimmed ? 0.45 : 1,
+						background: isSelected ? "var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover))" : "transparent"
+					},
+					onClick: () => {
+						setSelected(entry.path);
+						panelRef.current?.focus();
+						if (entry.is_dir) navigate(entry.path);
+						else openFile(entry.path, entry.name);
+					},
+					onContextMenu: (event) => openMenuAt(event, entry)
+				},
+					isRenaming
+						? h("input", {
+								ref: (node) => {
+									// autofocus without stealing the click
+									if (node) node.focus();
+								},
+								style: {
+									...filterInputStyle,
+									height: 24,
+									margin: "2px 0"
+								},
+								defaultValue: renaming.name,
+								onKeyDown: (event) => {
+									event.stopPropagation();
+									if (event.key === "Enter") {
+										commitRenameValue(event.currentTarget.value);
+									} else if (event.key === "Escape") {
+										setRenaming(null);
+									}
+								},
+								onBlur: () => setRenaming(null),
+								onClick: (event) => event.stopPropagation()
+							})
+						: h(react.Fragment, {},
+								(entry.fresh || entry.changed)
+									? h("span", {
+											title: entry.fresh ? "New since last refresh" : "Changed since last refresh",
+											style: {
+												width: 6,
+												height: 6,
+												borderRadius: "50%",
+												flex: "none",
+												background: entry.fresh
+													? "var(--dsw-alias-state-success-primary, #22c55e)"
+													: "var(--dsw-alias-state-warning-primary, #f59e0b)"
+											}
+										})
+									: null,
+								h("span", {
+									style: {
+										color: entry.is_dir ? "var(--dsw-alias-label-secondary)" : "var(--dsw-alias-label-tertiary)",
+										display: "grid",
+										placeItems: "center",
+										flex: "none"
+									}
+								}, entry.is_dir ? h(IconFolderOpen16, {}) : h(IconDataOutline16, {})),
+								h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 } }, entry.name),
+								entry.is_dir
+									? null
+									: h("span", {
+											style: {
+												flex: "none",
+												fontSize: 11,
+												color: "var(--dsw-alias-label-tertiary)",
+												fontVariantNumeric: "tabular-nums",
+												paddingLeft: 8
+											}
+										}, formatTime(entry.modified_ms), " ", formatSize(entry.size))
+							)
+				);
+			};
+
+			return h("div", { ref: panelRef, className: "dshd-explorer-panel", style: { ...style, outline: "none" }, tabIndex: 0, onKeyDown: onKeyDown, "data-dshd-explorer": true },
 				// Resize handle (docked columns have one, like the app's own).
 				h("div", { id: "dshd-explorer-resize", onPointerDown: (event) => startResize(event) }),
 				h("div", { style: headerStyle },
-					h("div", { style: tabsStyle },
-						h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
-							h(IconFolderOpenOutline16, {}), "Files"),
-						h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "preview"), onClick: () => explorerStore.setTab("preview") },
-							h(IconCodeOutline16, {}), "Preview")
-					),
+					picking
+						? h("div", { style: { ...tabsStyle, alignItems: "center" } },
+								h("span", { style: { fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "Choose a workspace folder"))
+						: h("div", { style: tabsStyle },
+								h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
+									h(IconFolderOpenOutline16, {}), "Files"),
+								h("button", { type: "button", className: "dshd-tab", style: tabStyle(tab === "preview"), onClick: () => explorerStore.setTab("preview") },
+									h(IconCodeOutline16, {}), "Preview")
+							),
 					h("button", {
 						type: "button",
 						className: "dshd-round",
@@ -610,80 +1547,131 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					}, h(IconCloseOutline16, {}))
 				),
 
-				tab === "files"
+				tab === "files" || picking
 					? h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
-							h("div", { style: { display: "flex", alignItems: "center", gap: 2, padding: "0 0 8px", flex: "none" } },
+							// Path bar: back/forward, workspace chip, crumbs,
+							// search toggle, new… menu.
+							h("div", { style: pathRowStyle },
+								h("button", { type: "button", className: "dshd-round", title: "Back", disabled: histIndex <= 0, onClick: () => goBack(), style: pathButton(histIndex <= 0) },
+									h(IconChevronLeftOutline14, {})),
+								h("button", { type: "button", className: "dshd-round", title: "Forward", disabled: histIndex >= history.length - 1, onClick: () => goForward(), style: pathButton(histIndex >= history.length - 1) },
+									h(IconChevronRightOutline14, {})),
 								h("button", {
 									type: "button",
 									className: "dshd-round",
 									title: "Up",
-									disabled: !cwd || busy,
+									disabled: !cwd || pathSegments(cwd).length <= 1,
 									onClick: () => goUp(),
-									style: pathButton(!cwd || busy)
-								}, h(IconChevronLeftOutline14, {})),
-								h("button", {
-									type: "button",
-									className: "dshd-round",
-									title: "Refresh",
-									disabled: !cwd || busy,
-									onClick: () => cwd && loadDir(cwd),
-									style: pathButton(!cwd || busy)
-								}, h(IconRefreshOutline14, {})),
-								h("div", {
-									title: cwd || "",
-									style: {
-										flex: 1,
-										minWidth: 0,
-										fontSize: 12,
-										color: "var(--dsw-alias-label-tertiary)",
-										whiteSpace: "nowrap",
-										overflow: "hidden",
-										textOverflow: "ellipsis",
-										fontFamily: "var(--ds-font-family-code, monospace)",
-										padding: "0 4px"
-									}
-								}, cwd || "…")
+									style: pathButton(!cwd || pathSegments(cwd).length <= 1)
+								}, h(IconChevronUpOutline14, {})),
+								h("div", { ref: crumbScrollRef, style: crumbStyle, className: "dshd-scroll" },
+									crumbs.map((crumb, index) =>
+										h(react.Fragment, { key: crumb.path },
+											index > 0
+												? h("span", { style: { color: "var(--dsw-alias-label-tertiary)", flex: "none", display: "grid", placeItems: "center" } },
+														h(IconChevronRightOutline14, {}))
+												: null,
+											h("button", {
+												type: "button",
+												style: index === crumbs.length - 1 ? crumbCurrentStyle : crumbButtonStyle,
+												title: crumb.path,
+												disabled: index === crumbs.length - 1,
+												onClick: () => navigate(crumb.path)
+											}, crumb.name)
+										)
+									)
+								),
+								h("button", { type: "button", className: "dshd-round", title: "Search (Ctrl+F)", style: roundButton, onClick: () => setFilterOpen((value) => !value) },
+									h(IconSearchOutline16, {})),
+								h("button", { type: "button", className: "dshd-round", title: "New file or folder", style: roundButton, onClick: (event) => openMenuAt(event, null) },
+									h(IconPlusOutline16, {}))
 							),
+							// Filter / recursive search row.
+							(filterOpen || filter !== "" || search !== null)
+								? h("div", { style: filterRowStyle },
+										h(IconSearchOutline16, {}),
+										h("input", {
+											ref: filterRef,
+											style: filterInputStyle,
+											value: filter,
+											placeholder: "Filter this folder — Enter searches recursively",
+											onChange: (event) => {
+												setFilter(event.target.value);
+												if (search) setSearch(null);
+											},
+											onKeyDown: (event) => {
+												event.stopPropagation();
+												if (event.key === "Enter") runSearch();
+												else if (event.key === "Escape") {
+													setFilter("");
+													setFilterOpen(false);
+													setSearch(null);
+												}
+											}
+										}),
+										search
+											? h("span", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", flex: "none" } },
+													`${search.items.length} match${search.items.length === 1 ? "" : "es"} in ${baseName(cwd)}`)
+											: null,
+										h("button", { type: "button", className: "dshd-round", title: "Clear", style: roundButton, onClick: () => { setFilter(""); setSearch(null); setFilterOpen(false); } },
+											h(IconCloseOutline16, {}))
+									)
+								: null,
 							error
 								? h("div", { style: { padding: "0 4px 8px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, error)
 								: null,
-							!entries
-								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: "0 8px", textAlign: "center" } },
-										busy ? "Loading…" : (error ? "Nothing to show" : "No workspace yet — pick a folder in Settings → dsh-desktop."))
-								: h("div", { className: "dshd-scroll", style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 0 12px" } },
-										entries.map((entry) =>
-											h("button", {
-												key: entry.path,
-												type: "button",
-												className: "dshd-row",
-												title: entry.path,
-												onClick: () => (entry.is_dir ? loadDir(entry.path) : openFile(entry.path, entry.name)),
-												style: {
-													display: "flex",
-													alignItems: "center",
-													gap: 8,
-													width: "100%",
-													minHeight: 30,
-													border: "none",
-													background: "transparent",
-													borderRadius: 8,
-													padding: "2px 8px",
-													cursor: "pointer",
-													font: "inherit",
-													color: "var(--dsw-alias-label-primary)",
-													boxSizing: "border-box"
+							creating
+								? h("div", { style: { ...rowStyle, padding: "2px 0" } },
+										h("input", {
+											style: { ...filterInputStyle, height: 24 },
+											placeholder: creating.kind === "dir" ? "Folder name" : "File name",
+											onKeyDown: (event) => {
+												event.stopPropagation();
+												if (event.key === "Enter") {
+													commitCreateValue(event.currentTarget.value);
+												} else if (event.key === "Escape") {
+													setCreating(null);
 												}
 											},
-												h("span", { style: { color: entry.is_dir ? "var(--dsw-alias-label-secondary)" : "var(--dsw-alias-label-tertiary)", display: "grid", placeItems: "center", flex: "none" } },
-													entry.is_dir ? h(IconFolderOpen16, {}) : h(IconDataOutline16, {})),
-												h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 } }, entry.name),
-												entry.is_dir
-													? null
-													: h("span", { style: { flex: "none", fontSize: 11, color: "var(--dsw-alias-label-tertiary)", fontVariantNumeric: "tabular-nums", paddingLeft: 8 } },
-															formatTime(entry.modified_ms), " ", formatSize(entry.size))
-											)
-										)
+											onBlur: () => setCreating(null),
+											onClick: (event) => event.stopPropagation(),
+											ref: (node) => {
+												if (node) node.focus();
+											}
+										})
 									)
+								: null,
+							search
+								? h("div", { className: "dshd-scroll", ref: scrollRef, style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 0 12px", outline: "none" } },
+										search.items.length === 0
+											? h("div", { style: { padding: "16px 8px", fontSize: 13, color: "var(--dsw-alias-label-tertiary)", textAlign: "center" } },
+													`No matches for “${search.query}” in this folder.`)
+											: search.items.map((entry, index) => renderRow(entry, index))
+									)
+								: !entries
+									? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: "0 8px", textAlign: "center" } },
+											busy ? "Loading…" : (error ? "Nothing to show" : "No workspace yet — pick a folder from the folder chip or in Settings → dsh-desktop."))
+									: h("div", { className: "dshd-scroll", ref: scrollRef, onContextMenu: (event) => openMenuAt(event, null), style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 0 12px", outline: "none" } },
+											(visible || []).map((entry, index) => renderRow(entry, index))
+										),
+							// Workspace chip: bottom status bar, out of the path
+							// row so the path keeps the full width.
+							!picking
+								? h("div", { style: statusBarStyle },
+										h("button", { type: "button", className: "dshd-round", title: "Workspaces", style: chipStyle, onClick: openChipMenu },
+											h(IconFolderClose16, {}),
+											h("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, currentWorkspaceTitle))
+									)
+								: null,
+							// Pick-mode footer (Е).
+							picking
+								? h("div", { style: pickFooterStyle },
+										h("div", { style: { flex: 1, minWidth: 0, fontSize: 12, color: "var(--dsw-alias-label-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+											"Workspace folder: ", cwd || "…"),
+										h(Button, { size: "sm", variant: "outline", onClick: cancelPick }, "Cancel"),
+										h(Button, { size: "sm", variant: "primary", disabled: !cwd || busy, onClick: () => selectPick() }, "Select this folder")
+									)
+								: null
 						)
 					: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
 							preview === null
@@ -727,10 +1715,58 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 																			`Preview cut at 1 MB — the full file is ${formatSize(preview.size)}.`)
 																	: null)
 									)
-						)
+						),
+
+				// Context menu (the single action surface: rows + empty space).
+				h(Menu, {
+					open: menu !== null,
+					anchor: null,
+					portal: true,
+					compact: true,
+					getAnchorRect: menuAnchorRect,
+					items: buildMenuItems(menu ? menu.entry : null),
+					selectedId: menu ? (sort === "name" ? "sort-name" : sort === "size" ? "sort-size" : "sort-date") : void 0,
+					onSelect: (id) => {
+						const target = menu;
+						setMenu(null);
+						if (target) handleMenu(id, target.entry);
+					},
+					onClose: () => setMenu(null)
+				}),
+
+				// Workspace chip menu (switch / choose folder).
+				!picking
+					? h(Menu, {
+							open: chipOpen,
+							anchor: null,
+							portal: true,
+							compact: true,
+							getAnchorRect: chipAnchorRect,
+							items: chipItems,
+							selectedId: chipSelected,
+							footer: [{ id: "pick-folder", label: "Choose folder…", icon: h(IconFolderOpenOutline16, {}) }],
+							onSelect: handleChip,
+							onClose: () => setChipOpen(false)
+						})
+					: null,
+
+				// Delete confirmation (move to trash).
+				h(Modal, {
+					open: confirmDelete !== null,
+					onClose: () => setConfirmDelete(null),
+					closeLabel: "Cancel",
+					title: "Move to trash?",
+					footer: [
+						h(Button, { key: "cancel", variant: "outline", size: "sm", onClick: () => setConfirmDelete(null) }, "Cancel"),
+						h(Button, { key: "delete", size: "sm", icon: h(IconTrashOutline16, {}), onClick: () => commitDelete() }, "Move to trash")
+					],
+					children: h("div", { style: { fontSize: 13, color: "var(--dsw-alias-label-secondary)", lineHeight: 1.6 } },
+						confirmDelete ? `“${confirmDelete.name}” will be moved to the OS trash — it can be restored.` : "")
+				})
 			);
 		}
 		//#endregion
+
 
 		//#region dsh-desktop settings tab
 		const CARD = {
@@ -912,21 +1948,19 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				}
 			}, []);
 
-			// Native folder picker → attach the chosen directory as a workspace.
-			const pickWorkspace = useCallback(async () => {
+			// Workspace folder → the explorer panel's "choose a folder" mode
+			// (no OS dialog: the same file manager the user browses with).
+			const pickWorkspace = useCallback(() => {
 				if (busy) return;
-				setBusy(true);
-				try {
-					setError(null);
-					const path = await window.__TAURI__.core.invoke("desktop_pick_directory");
-					if (typeof path === "string" && path !== "" && typeof openWorkspace === "function") {
-						await openWorkspace(path);
-					}
-				} catch (caught) {
-					setError(errText(caught));
-				} finally {
-					setBusy(false);
-				}
+				explorerStore.setPick({
+					onPicked: async (path) => {
+						if (typeof openWorkspace === "function") await openWorkspace(path);
+					},
+					onCancel: () => {},
+					onError: (message) => setError(message)
+				});
+				explorerStore.setTab("files");
+				explorerStore.setOpen(true);
 			}, [busy]);
 
 			// No native client: this harness runs in a plain browser.
@@ -1024,7 +2058,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					h("div", { style: H3 }, "Workspace"),
 					h(Row, {
 						label: "Choose folder…",
-						hint: "Open a native folder picker and attach the chosen directory as a workspace. You can also just drag a folder into the window.",
+						hint: "Pick a directory in the file manager panel and attach it as a workspace. You can also just drag a folder into the window.",
 						control: h(Button, {
 							size: "sm",
 							icon: h(IconFolderOpenOutline16, {}),
@@ -1112,6 +2146,31 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			);
 		}
 
+		/** The harness directory-flow occupant: when a workspace-pick flow
+		* opens (conversation hero "Add workspace" or the sidebar browser),
+		* switch the docked explorer panel into "choose a folder" mode and
+		* route its outcome back into the flow. Renders nothing itself — the
+		* panel is the picker. */
+		function DesktopDirectoryFlow(props) {
+			const { open, onPicked, onCancel } = props;
+			const lastCancel = useRef(onCancel);
+			lastCancel.current = onCancel;
+			useEffect(() => {
+				if (open) {
+					explorerStore.setPick({
+						onPicked,
+						onCancel,
+						onError: props.onError
+					});
+					explorerStore.setTab("files");
+					explorerStore.setOpen(true);
+				} else if (explorerStore.pick !== null && explorerStore.pick.onCancel === lastCancel.current) {
+					explorerStore.clearPick();
+				}
+			}, [open]);
+			return null;
+		}
+
 		/** Register the section once the settings surface declares its section slot. */
 		function apply(ctx) {
 			explorerStore.init();
@@ -1149,15 +2208,42 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			}, DesktopSection));
 			// The explorer panel: docked right, Files/Preview tabs. Registered
 			// into the shell overlay (the app's full-frame overlay layer) once
-			// the layout plugin declares it.
+			// the layout plugin declares it. `sessions`/`conversation` are
+			// resolved lazily at render time (they are client services that
+			// mount after this bundle).
 			if (hasTauri()) {
 				ctx.slots.inject("shell.overlay", () => ctx.slots.register({
 					name: "shell.overlay",
 					id: "desktop-explorer",
 					order: 90,
 					locale: NS,
-					inject: () => ({ workspaces: ctx.workspaces })
+					inject: () => ({
+						workspaces: ctx.workspaces,
+						sessions: ctx.sessions,
+						conversation: ctx.conversation
+					})
 				}, ExplorerPanel));
+				// The workspace picker: replace the OS-folder-dialog flow in
+				// both harness holes (conversation hero + sidebar browser) with
+				// this panel in "choose a folder" mode. The holes are single-
+				// occupant; the native/browse surfaces register at the default
+				// priority 0, so priority -1 shadows them (lowest renders).
+				ctx.slots.inject("conversation.hero.workspace.directoryFlow", () => ctx.slots.inject("sidebar.workspaces.directoryFlow", function* () {
+					yield ctx.slots.register({
+						name: "conversation.hero.workspace.directoryFlow",
+						id: "desktop-picker",
+						order: 90,
+						priority: -1,
+						locale: NS
+					}, DesktopDirectoryFlow);
+					yield ctx.slots.register({
+						name: "sidebar.workspaces.directoryFlow",
+						id: "desktop-picker",
+						order: 90,
+						priority: -1,
+						locale: NS
+					}, DesktopDirectoryFlow);
+				}));
 			}
 		}
 		//#endregion

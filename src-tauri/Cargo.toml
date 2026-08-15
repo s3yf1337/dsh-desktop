@@ -38,6 +38,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 semver = { version = "1", features = ["serde"] }
 # Open the browser on the release page ("suggest update" is the whole point).
 open = "5"
+trash = "5"
 # Periodic updater sleeps + update download/apply (tauri's async runtime is
 # tokio underneath).
 tokio = { version = "1", features = ["time", "fs", "io-util"] }

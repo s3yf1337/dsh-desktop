@@ -37,11 +37,17 @@ for (const name of [
 	"IconDownloadOutline16", "IconRefreshOutline14", "IconGlobeOutline14",
 	"IconSettingsOutline16", "IconFolderOpenOutline16", "IconFolderOpen16",
 	"IconChevronLeftOutline14", "IconChevronRightOutline14", "IconCloseOutline16",
-	"IconCodeOutline16", "IconDataOutline16", "IconSearchOutline16", "IconPanelLeftOutline16"
+	"IconCodeOutline16", "IconDataOutline16", "IconSearchOutline16", "IconPanelLeftOutline16",
+	"IconPlusOutline16", "IconCheckOutline14", "IconCopyOutline16", "IconTrashOutline16",
+	"IconEditOutline16", "IconChevronUpOutline14", "IconPaperclipOutline16", "IconRightUpOutline14",
+	"IconLinkOutline16", "IconSendOutline14", "IconFolderClose16"
 ]) {
 	primitivesStub[name] = () => h("svg", { "data-icon": name });
 }
 primitivesStub.Button = Primitive;
+primitivesStub.Menu = () => null;
+primitivesStub.Modal = () => null;
+primitivesStub.writeClipboard = async () => true;
 
 globalThis.localStorage = localStorageShim;
 globalThis.window = {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-move"
+description = "Enables the desktop_move command without any pre-configured scope."
+commands.allow = ["desktop_move"]
+
+[[permission]]
+identifier = "deny-desktop-move"
+description = "Denies the desktop_move command without any pre-configured scope."
+commands.deny = ["desktop_move"]

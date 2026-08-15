@@ -37,6 +37,14 @@
     "allow-desktop-list-dir",
     "allow-desktop-parent-dir",
     "allow-desktop-read-file",
-    "allow-desktop-home-dir"
+    "allow-desktop-home-dir",
+    "allow-desktop-write-file",
+    "allow-desktop-create-dir",
+    "allow-desktop-rename",
+    "allow-desktop-delete",
+    "allow-desktop-copy",
+    "allow-desktop-move",
+    "allow-desktop-open-path",
+    "allow-desktop-search-names"
   ]
 }

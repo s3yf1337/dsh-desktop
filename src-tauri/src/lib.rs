@@ -260,6 +260,14 @@ fn run_window(raw: String) -> i32 {
 			fs::desktop_parent_dir,
 			fs::desktop_read_file,
 			fs::desktop_home_dir,
+			fs::desktop_write_file,
+			fs::desktop_create_dir,
+			fs::desktop_rename,
+			fs::desktop_delete,
+			fs::desktop_copy,
+			fs::desktop_move,
+			fs::desktop_open_path,
+			fs::desktop_search_names,
 		])
 		.setup(|app| {
 			// reqwest is built with `rustls-no-provider`; ring is the provider.

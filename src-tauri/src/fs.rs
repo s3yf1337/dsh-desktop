@@ -155,6 +155,156 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 	})
 }
 
+/// Write (create or overwrite) one text file. Backs "new file", inline
+/// editing, and any future save path — the panel's only write primitive.
+#[tauri::command]
+pub fn desktop_write_file(path: String, content: String) -> Result<(), String> {
+	std::fs::write(&path, content).map_err(|error| format!("cannot write {path}: {error}"))
+}
+
+/// Create one directory (fails when the parent is missing or it exists).
+#[tauri::command]
+pub fn desktop_create_dir(path: String) -> Result<(), String> {
+	std::fs::create_dir(&path).map_err(|error| format!("cannot create {path}: {error}"))
+}
+
+/// Rename a file or directory inside its own parent (a same-dir move).
+#[tauri::command]
+pub fn desktop_rename(path: String, new_name: String) -> Result<(), String> {
+	if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') {
+		return Err("invalid name".into());
+	}
+	let source = std::path::PathBuf::from(&path);
+	let target = source
+		.parent()
+		.map(|parent| parent.join(&new_name))
+		.ok_or_else(|| format!("cannot resolve parent of {path}"))?;
+	std::fs::rename(&source, &target).map_err(|error| format!("cannot rename {path}: {error}"))
+}
+
+/// Move a file or directory into the OS trash (recoverable; never rm).
+#[tauri::command]
+pub fn desktop_delete(path: String) -> Result<(), String> {
+	trash::delete(&path).map_err(|error| format!("cannot move {path} to trash: {error}"))
+}
+
+/// Copy one file or directory tree into `dest_dir`, keeping the source name.
+/// An existing destination is replaced (copy semantics, like a file manager).
+#[tauri::command]
+pub fn desktop_copy(src: String, dest_dir: String) -> Result<(), String> {
+	let source = std::path::PathBuf::from(&src);
+	let name = source
+		.file_name()
+		.ok_or_else(|| format!("cannot copy {src}: no file name"))?
+		.to_string_lossy()
+		.into_owned();
+	let target = std::path::PathBuf::from(&dest_dir).join(&name);
+	copy_tree(&source, &target).map_err(|error| format!("cannot copy {src}: {error}"))
+}
+
+/// Move one file or directory into `dest_dir` (rename; falls back to
+/// copy+remove across devices). An existing destination is replaced.
+#[tauri::command]
+pub fn desktop_move(src: String, dest_dir: String) -> Result<(), String> {
+	let source = std::path::PathBuf::from(&src);
+	let name = source
+		.file_name()
+		.ok_or_else(|| format!("cannot move {src}: no file name"))?
+		.to_string_lossy()
+		.into_owned();
+	let target = std::path::PathBuf::from(&dest_dir).join(&name);
+	if std::fs::rename(&source, &target).is_ok() {
+		return Ok(());
+	}
+	// Cross-device (EXDEV) or any other rename failure: copy, then remove.
+	copy_tree(&source, &target).map_err(|error| format!("cannot move {src}: {error}"))?;
+	remove_tree(&source).map_err(|error| format!("cannot move {src}: copied but cannot remove the source: {error}"))
+}
+
+/// Open a file or directory with the OS default application (for directories
+/// that is the system file manager).
+#[tauri::command]
+pub fn desktop_open_path(path: String) -> Result<(), String> {
+	open::that(&path).map_err(|error| format!("cannot open {path}: {error}"))
+}
+
+/// Recursive filename search from `root`: case-insensitive substring match,
+/// bounded by `max` results (default 200) and a depth cap so pathological
+/// trees cannot hang the panel. Directories match too.
+#[tauri::command]
+pub fn desktop_search_names(root: String, query: String, max: Option<usize>) -> Result<Vec<FileEntry>, String> {
+	const MAX_DEPTH: usize = 8;
+	let max = max.unwrap_or(200).clamp(1, 1000);
+	let needle = query.to_lowercase();
+	if needle.is_empty() {
+		return Ok(Vec::new());
+	}
+	let mut out = Vec::new();
+	walk_names(&std::path::PathBuf::from(&root), &needle, 0, MAX_DEPTH, max, &mut out);
+	Ok(out)
+}
+
+/// Recursive copy (files and directories, following no symlinks).
+fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+	let meta = std::fs::symlink_metadata(source)?;
+	if meta.is_dir() {
+		if target.exists() {
+			// Replace an existing destination (copy semantics).
+			remove_tree(target)?;
+		}
+		std::fs::create_dir_all(target)?;
+		for entry in std::fs::read_dir(source)? {
+			let entry = entry?;
+			copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+		}
+		Ok(())
+	} else {
+		std::fs::copy(source, target).map(|_| ())
+	}
+}
+
+/// Recursive remove (files and directories, following no symlinks).
+fn remove_tree(path: &std::path::Path) -> std::io::Result<()> {
+	let meta = std::fs::symlink_metadata(path)?;
+	if meta.is_dir() {
+		std::fs::remove_dir_all(path)
+	} else {
+		std::fs::remove_file(path)
+	}
+}
+
+/// Bounded depth-first walk matching entry names (case-insensitive substring).
+fn walk_names(dir: &std::path::Path, needle: &str, depth: usize, max_depth: usize, max: usize, out: &mut Vec<FileEntry>) {
+	if depth > max_depth || out.len() >= max {
+		return;
+	}
+	let Ok(read) = std::fs::read_dir(dir) else { return };
+	for entry in read.flatten() {
+		if out.len() >= max {
+			return;
+		}
+		let Ok(meta) = entry.metadata() else { continue };
+		let name = entry.file_name().to_string_lossy().into_owned();
+		if name.to_lowercase().contains(needle) {
+			let modified = meta
+				.modified()
+				.ok()
+				.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+				.map(|d| d.as_millis() as u64);
+			out.push(FileEntry {
+				path: entry.path().to_string_lossy().into_owned(),
+				is_dir: meta.is_dir(),
+				size: if meta.is_dir() { None } else { Some(meta.len()) },
+				modified_ms: modified,
+				name,
+			});
+		}
+		if meta.is_dir() {
+			walk_names(&entry.path(), needle, depth + 1, max_depth, max, out);
+		}
+	}
+}
+
 // Base64 without pulling the base64 crate: encode in 3-byte blocks. Simple,
 // correct, and fast enough for an 8 MiB cap.
 fn base64_encode(data: &[u8]) -> String {
