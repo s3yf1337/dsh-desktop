@@ -1,11 +1,12 @@
 // Smoke test for the dsh-desktop browser plugin (bundle/lib/client.js).
 //
-// Loads the REAL client.js module against real react + real
-// @deepseek-ai/dsh-client-ui-primitives, runs its apply() with a mock plugin
-// context, then server-renders the explorer panel and the settings section.
-// Any render error (wrong icon import, bad hook usage, undefined component)
-// fails this test. The title bar needs a DOM, so it is skipped here; the
-// panel and settings are the React-rendered half.
+// Loads the REAL client.js module against real react + react-dom, with
+// @deepseek-ai/dsh-client-ui-primitives STUBBED (the primitivesStub below),
+// runs its apply() with a mock plugin context, then server-renders the
+// explorer panel and the settings section. This checks the import-name
+// contract of the primitives (a missing/renamed import becomes undefined and
+// fails the render) plus that the panel renders. The title bar needs a DOM,
+// so it is skipped here; the panel and settings are the React-rendered half.
 //
 // Run: node test/client-smoke.mjs  (set DSH_NM to the dsh install with
 // react/react-dom when dsh lives elsewhere than the default below)
@@ -13,7 +14,7 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const DSH_NM = process.env.DSH_NM || "/home/seyf/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules";
+const DSH_NM = process.env.DSH_NM || "/home/seyf/.local/lib/node_modules/@deepseek-ai/dsh/node_modules";
 const react = require(DSH_NM + "/react");
 const { renderToString } = require(DSH_NM + "/react-dom/server");
 const h = react.createElement;
