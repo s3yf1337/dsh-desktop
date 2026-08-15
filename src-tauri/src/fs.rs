@@ -110,10 +110,10 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 	let meta = std::fs::metadata(&file).map_err(|error| format!("cannot stat {path}: {error}"))?;
 	let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 	let size = meta.len();
-	let data = std::fs::read(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
 
 	if let Some(mime) = is_image(&name) {
 		if size > IMAGE_CAP {
+			// Refuse to read a huge image into memory at all.
 			return Ok(FileContent {
 				path,
 				name,
@@ -124,11 +124,23 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 				truncated: true,
 			});
 		}
+		let data = std::fs::read(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
 		let content = base64_encode(&data);
 		return Ok(FileContent { path, name, size, mime: mime.to_string(), encoding: "base64".into(), content, truncated: false });
 	}
 
-	// Binary sniff: NUL in the first 8 KiB means "no text preview".
+	// Binary sniff: NUL in the first 8 KiB means "no text preview". Reading the
+	// cap's worth of bytes up front keeps a huge file out of memory.
+	let prefix_cap: usize = TEXT_CAP.saturating_add(1).max(8192);
+	let mut data = Vec::new();
+	{
+		use std::io::Read;
+		let file = std::fs::File::open(&file).map_err(|error| format!("cannot read {path}: {error}"))?;
+		file.take(prefix_cap as u64)
+			.read_to_end(&mut data)
+			.map_err(|error| format!("cannot read {path}: {error}"))?;
+	}
+
 	if data.iter().take(8192).any(|&b| b == 0) {
 		return Ok(FileContent {
 			path,
@@ -142,7 +154,7 @@ pub fn desktop_read_file(path: String) -> Result<FileContent, String> {
 	}
 
 	let text = String::from_utf8_lossy(&data);
-	let truncated = text.len() > TEXT_CAP;
+	let truncated = data.len() > TEXT_CAP;
 	let content = if truncated { text.chars().take(TEXT_CAP).collect::<String>() } else { text.into_owned() };
 	Ok(FileContent {
 		path,
@@ -302,6 +314,62 @@ fn walk_names(dir: &std::path::Path, needle: &str, depth: usize, max_depth: usiz
 		if meta.is_dir() {
 			walk_names(&entry.path(), needle, depth + 1, max_depth, max, out);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn temp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+		let mut path = std::env::temp_dir();
+		path.push(format!("dsh-desktop-test-{}-{name}", std::process::id()));
+		std::fs::write(&path, bytes).unwrap();
+		path
+	}
+
+	fn rm(path: &std::path::Path) {
+		let _ = std::fs::remove_file(path);
+	}
+
+	#[test]
+	fn rename_rejects_dot_names() {
+		let source = std::env::temp_dir()
+			.join(format!("dsh-desktop-rename-plugin-{}", std::process::id()));
+		std::fs::write(&source, b"x").unwrap();
+		for bad in ["", ".", "..", "a/b", "a\\b"] {
+			assert!(desktop_rename(source.to_string_lossy().into_owned(), bad.into()).is_err(), "expected reject for {bad:?}");
+		}
+		// A valid new name should still pass validation, so the guard only
+		// rejects dot/separator names, not valid ones.
+		let target = source.parent().unwrap().join("ok-renamed");
+		assert!(desktop_rename(source.to_string_lossy().into_owned(), "ok-renamed".into()).is_ok());
+		rm(&source);
+		rm(&target);
+	}
+
+	#[test]
+	fn read_file_truncates_at_text_cap() {
+		let mut bytes = vec![0u8; TEXT_CAP + 1000];
+		bytes.fill(b'a');
+		let path = temp_file("big.txt", &bytes);
+		let out = desktop_read_file(path.to_string_lossy().into_owned()).expect("read should succeed");
+		assert!(out.truncated, "expected truncated");
+		assert_eq!(out.encoding, "utf8");
+		assert!(out.content.len() <= TEXT_CAP, "content over the cap: {}", out.content.len());
+		rm(&path);
+	}
+
+	#[test]
+	fn read_file_refuses_huge_image() {
+		let mut bytes = vec![0u8; (IMAGE_CAP + 1000) as usize];
+		bytes.fill(b'a');
+		let path = temp_file("big.png", &bytes);
+		let out = desktop_read_file(path.to_string_lossy().into_owned()).expect("read should succeed");
+		assert_eq!(out.encoding, "binary");
+		assert!(out.truncated, "expected truncated for oversized image");
+		assert!(out.content.is_empty(), "image over the cap should not be read into memory");
+		rm(&path);
 	}
 }
 
