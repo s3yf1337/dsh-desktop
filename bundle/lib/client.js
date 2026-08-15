@@ -55,16 +55,25 @@ window.__ModuleLoader__.load({
 			return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 		}
 
+		/** Explorer panel geometry (min/default/max width, like the app's own
+		* sidebar/details columns which clamp into a contract range). */
+		const EXPLORER_MIN_WIDTH = 260;
+		const EXPLORER_DEFAULT_WIDTH = 340;
+		const EXPLORER_MAX_WIDTH = 560;
+
 		/** Shared explorer panel state (the DOM title bar and the React panel
 		* communicate through this tiny store). */
 		const explorerStore = {
 			open: false,
 			tab: "files",
+			width: EXPLORER_DEFAULT_WIDTH,
 			listeners: new Set(),
 			init() {
 				if (typeof localStorage === "undefined") return;
 				this.open = localStorage.getItem("dshd.explorer.open") === "1";
 				this.tab = localStorage.getItem("dshd.explorer.tab") === "preview" ? "preview" : "files";
+				const saved = Number(localStorage.getItem("dshd.explorer.width") || 0);
+				if (saved >= EXPLORER_MIN_WIDTH && saved <= EXPLORER_MAX_WIDTH) this.width = saved;
 			},
 			setOpen(open) {
 				this.open = !!open;
@@ -79,6 +88,12 @@ window.__ModuleLoader__.load({
 				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.tab", tab);
 				this.notify();
 			},
+			setWidth(width) {
+				const clamped = Math.min(EXPLORER_MAX_WIDTH, Math.max(EXPLORER_MIN_WIDTH, width));
+				this.width = clamped;
+				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.width", String(clamped));
+				this.notify();
+			},
 			subscribe(fn) {
 				this.listeners.add(fn);
 				return () => this.listeners.delete(fn);
@@ -87,6 +102,28 @@ window.__ModuleLoader__.load({
 				for (const fn of this.listeners) fn();
 			}
 		};
+
+		/** The app's layout frame: the grid element whose columns the sidebar
+		* and details panels live in (found via the shell-overlay layer, which
+		* is its direct child). */
+		function frameElement() {
+			if (typeof document === "undefined") return null;
+			const overlay = document.querySelector("[data-shell-overlay]");
+			return overlay && overlay.parentElement ? overlay.parentElement : null;
+		}
+
+		/** Reserve `width` px on the right of the frame for the docked explorer
+		* panel (0 closes it). The frame already animates grid-template-columns;
+		* padding-right joins that transition, so the main content slides with
+		* the same easing as the app's own sidebar/details columns. */
+		function syncExplorerLayout(width) {
+			const frame = frameElement();
+			if (!frame) return;
+			frame.style.paddingRight = `${width}px`;
+			frame.style.transition =
+				"grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out), " +
+				"padding-right var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
+		}
 		//#endregion
 
 		//#region custom title bar (plain DOM, fixed to the viewport top)
@@ -108,6 +145,14 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 #dshd-resize-nw{position:fixed;top:0;left:0;width:9px;height:9px;z-index:9999;cursor:nwse-resize}
 #dshd-resize-se{position:fixed;right:0;bottom:0;width:9px;height:9px;z-index:9999;cursor:nwse-resize}
 #dshd-resize-sw{position:fixed;left:0;bottom:0;width:9px;height:9px;z-index:9999;cursor:nesw-resize}
+/* Explorer panel resize handle: an 8px strip on the panel's left edge with
+   a floating pill on hover, same visual language as the app's own column
+   drag handles. */
+#dshd-explorer-resize{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;touch-action:none;z-index:3}
+#dshd-explorer-resize:after{content:"";box-sizing:border-box;background:var(--dsw-alias-button-floating-fill);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);opacity:0;width:12px;height:32px;transition:opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out),background var(--ds-transition-duration-slow) var(--ds-ease-in-out);border-radius:10px;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}
+#dshd-explorer-resize:hover:after,#dshd-explorer-resize.dragging:after{opacity:1}
+#dshd-explorer-resize:hover:after,#dshd-explorer-resize.dragging:after{background:var(--dsw-alias-button-floating-hover);border-color:var(--dsw-alias-border-l3)}
+body.dshd-resizing{user-select:none;cursor:col-resize}
 `;
 
 		function svgIcon(path, size = 12) {
@@ -274,8 +319,6 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 		//#endregion
 
 		//#region explorer panel (Files / Preview tabs, right-hand, hideable)
-		const EXPLORER_WIDTH = 340;
-
 		function formatSize(bytes) {
 			if (bytes === void 0 || bytes === null) return "";
 			if (bytes < 1024) return `${bytes} B`;
@@ -303,17 +346,72 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 		function ExplorerPanel({ workspaces, close }) {
 			const [open, setOpen] = useState(explorerStore.open);
 			const [tab, setTab] = useState(explorerStore.tab);
+			const [width, setWidth] = useState(explorerStore.width);
 			const [cwd, setCwd] = useState(null);
 			const [entries, setEntries] = useState(null);
 			const [error, setError] = useState(null);
 			const [preview, setPreview] = useState(null);
 			const [previewError, setPreviewError] = useState(null);
 			const [busy, setBusy] = useState(false);
+			const panelRef = useRef(null);
+			// The panel stays mounted for one transition after closing, so the
+			// docked space animates shut with the content instead of popping.
+			const [rendered, setRendered] = useState(explorerStore.open);
 
 			useEffect(() => explorerStore.subscribe(() => {
 				setOpen(explorerStore.open);
 				setTab(explorerStore.tab);
+				setWidth(explorerStore.width);
 			}), []);
+
+			// Dock/un-dock: reserve the panel width on the frame (the frame
+			// animates padding-right with the app's own transition tokens, so
+			// the main content slides exactly like the sidebar/details panels).
+			useEffect(() => {
+				if (open) {
+					setRendered(true);
+					syncExplorerLayout(explorerStore.width);
+					return;
+				}
+				syncExplorerLayout(0);
+				const timer = setTimeout(() => setRendered(false), 320);
+				return () => clearTimeout(timer);
+			}, [open, width]);
+
+			// Resize: drag the handle → live-update the panel width + frame
+			// padding during the drag, commit to the store on release.
+			const startResize = (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const handle = event.currentTarget;
+				const startX = event.clientX;
+				const startWidth = explorerStore.width;
+				let lastWidth = startWidth;
+				handle.classList.add("dragging");
+				document.body.classList.add("dshd-resizing");
+				const onMove = (moveEvent) => {
+					const next = Math.min(
+						EXPLORER_MAX_WIDTH,
+						Math.max(EXPLORER_MIN_WIDTH, startWidth + (startX - moveEvent.clientX))
+					);
+					lastWidth = next;
+					if (panelRef.current) panelRef.current.style.width = `${next}px`;
+					syncExplorerLayout(next);
+				};
+				const onUp = () => {
+					handle.classList.remove("dragging");
+					document.body.classList.remove("dshd-resizing");
+					handle.removeEventListener("pointermove", onMove);
+					handle.removeEventListener("pointerup", onUp);
+					handle.removeEventListener("pointercancel", onUp);
+					explorerStore.setWidth(lastWidth);
+					setWidth(lastWidth);
+				};
+				handle.setPointerCapture(event.pointerId);
+				handle.addEventListener("pointermove", onMove);
+				handle.addEventListener("pointerup", onUp);
+				handle.addEventListener("pointercancel", onUp);
+			};
 
 			// Initial root: the current workspace directory, else home.
 			const root = useMemo(() => {
@@ -389,14 +487,14 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 				}
 			}, [cwd, loadDir]);
 
-			if (!open) return null;
+			if (!rendered) return null;
 
 			const style = {
 				position: "absolute",
 				top: 0,
 				right: 0,
 				bottom: 0,
-				width: EXPLORER_WIDTH,
+				width,
 				background: "var(--dsw-alias-bg-layer-1)",
 				borderLeft: "1px solid var(--dsw-alias-border-l2)",
 				boxShadow: "var(--dsw-shadow-lv3)",
@@ -436,7 +534,9 @@ body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box
 				boxShadow: active ? "var(--dsw-shadow-lv1)" : "none"
 			});
 
-			return h("div", { style, "data-dshd-explorer": true },
+			return h("div", { ref: panelRef, style, "data-dshd-explorer": true },
+				// Resize handle (docked columns have one, like the app's own).
+				h("div", { id: "dshd-explorer-resize", onPointerDown: (event) => startResize(event) }),
 				h("div", { style: headerStyle },
 					h("div", { style: tabsStyle },
 						h("button", { type: "button", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
