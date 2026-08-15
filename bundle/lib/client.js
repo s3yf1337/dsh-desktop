@@ -560,7 +560,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				// no live state — the path alone still lands in the draft
 			}
 			const sep = draft && !draft.endsWith(" ") && !draft.endsWith("\n") ? " " : "";
-			session.actions.setDraft(draft + sep + path);
+			// Wrap the raw path in inline code when it carries markdown metacharacters
+			// (spaces, *, _, #, [, ], (), `) so it stays visually literal in the draft.
+			const escaped = /[\s*_#\[\]()\\`]/.test(path)
+				? "`" + path.replace(/`/g, "``") + "`"
+				: path;
+			session.actions.setDraft(draft + sep + escaped);
 			focusComposer();
 			return true;
 		}
