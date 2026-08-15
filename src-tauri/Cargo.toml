@@ -40,9 +40,6 @@ semver = { version = "1", features = ["serde"] }
 open = "5"
 # Periodic updater sleeps (tauri's async runtime is tokio underneath).
 tokio = { version = "1", features = ["time"] }
-# Set the GTK application name so the system tray (libappindicator) shows
-# "DeepSeek Harness" instead of the binary name on hover.
-glib = "0.18"
 
 # Local patch: tao unconditionally installs its own GtkHeaderBar (CSD
 # titlebar) on every Wayland window, forcing a GNOME-style header even on
@@ -59,3 +56,10 @@ strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Set the GTK application name so the system tray (libappindicator) shows
+# "DeepSeek Harness" instead of the binary name on hover. Linux-only: glib is
+# a GTK binding and does not build on Windows/macOS (the tray title there
+# comes from other channels).
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"

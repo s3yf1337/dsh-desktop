@@ -141,6 +141,7 @@ pub fn run() {
 			// The GTK application name becomes the system tray item's title
 			// (libappindicator derives the SNI Title from it), so hovering the
 			// tray icon shows "DeepSeek Harness", not the binary's name.
+			#[cfg(target_os = "linux")]
 			glib::set_application_name("DeepSeek Harness");
 
 			// Load persisted preferences into the managed state.
