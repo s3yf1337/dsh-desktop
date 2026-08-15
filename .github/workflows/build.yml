@@ -64,6 +64,15 @@ jobs:
             -C src-tauri/target/release "$BIN" \
             -C ../../../ bundle
 
+      # Produce the `<tarball>.sha256` checksum the updater verifies before
+      # applying an update. sha256sum ships with Git Bash on Windows too.
+      - name: Sha256 the update tarball
+        shell: bash
+        run: |
+          TARBALL="dsh-desktop-${GITHUB_REF_NAME}-${{ matrix.slug }}.tar.gz"
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          cat "$TARBALL.sha256"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -72,6 +81,7 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**/*
             dsh-desktop-*.tar.gz
+            dsh-desktop-*.sha256
 
   # Publish exactly one release from one job: this job downloads the per-OS
   # installers + update tarballs and creates the GitHub release. dsh-desktop
