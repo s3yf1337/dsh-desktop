@@ -61,6 +61,10 @@ dsh-desktop tab drives it directly through the `desktop_*` commands.
   (`agent/error`), and the agent asking a question (`ask_user_question`).
   Notifications are suppressed while the window is focused and respect the
   `notifications` setting.
+- **Native dialogs + drag & drop** — "Workspace → Pick folder" opens the
+  native folder picker (`tauri-plugin-dialog`) and attaches the directory as
+  a harness workspace; dropping a folder onto the window does the same.
+  Files dropped onto the window still flow to the SPA as attachments.
 - **Settings tab** — Settings → **dsh-desktop** in the web UI: toggles for
   tray, notifications, and automatic update checks, the check interval,
   check-now, release page, geometry reset, and version info. In a plain
