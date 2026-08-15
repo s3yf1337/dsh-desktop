@@ -937,13 +937,18 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			}, [open, root, cwd, loadDir]);
 
 			const openFile = useCallback(async (path, name) => {
+				const seq = ++previewSeqRef.current;
 				setPreviewError(null);
 				setPreview({ path, name, loading: true });
 				explorerStore.setTab("preview");
 				try {
 					const content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
+					// A newer preview has superseded this response — drop it so it
+					// cannot overwrite the current file's preview.
+					if (seq !== previewSeqRef.current) return;
 					setPreview({ path, name, loading: false, ...content });
 				} catch (caught) {
+					if (seq !== previewSeqRef.current) return;
 					setPreview({ path, name, loading: false, failed: true, error: errText(caught) });
 				}
 			}, []);
