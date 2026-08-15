@@ -71,7 +71,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 			}
 			ID_OPEN_UPDATE => {
 				let state = app.state::<AppState>();
-				let info = state.update.lock().unwrap().clone();
+				let info = state.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 				if let Some(info) = info {
 					crate::log::info(app, &format!("opening release page {}", info.url));
 					let _ = open::that(info.url);
@@ -104,7 +104,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 pub fn rebuild(app: &AppHandle) {
 	if let Some(tray) = app.tray_by_id("main") {
 		let state = app.state::<AppState>();
-		let update = state.update.lock().unwrap().clone();
+		let update = state.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 		match build_menu(app, update.as_ref()) {
 			Ok(menu) => {
 				let _ = tray.set_menu(Some(menu));

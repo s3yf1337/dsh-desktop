@@ -283,8 +283,8 @@ fn run_window(raw: String) -> i32 {
 			let loaded = settings::load(&config_dir);
 			{
 				let state = app.state::<AppState>();
-				*state.settings.lock().unwrap() = loaded;
-				*state.config_dir.lock().unwrap() = config_dir.to_string_lossy().into_owned();
+				*state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = loaded;
+				*state.config_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = config_dir.to_string_lossy().into_owned();
 			}
 			log::info(app.handle(), "desktop shell starting");
 
@@ -293,14 +293,14 @@ fn run_window(raw: String) -> i32 {
 			// to the plain close-exits behavior by disabling the tray setting.
 			if let Err(error) = tray::setup(app.handle()) {
 				log::warn(app.handle(), &format!("tray unavailable, falling back to close-exits: {error}"));
-				app.state::<AppState>().settings.lock().unwrap().tray = false;
+				app.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tray = false;
 			}
 
 			// Ask for notification permission once (no-op on Linux, prompt on
 			// macOS/Windows) when notifications are enabled.
 			{
 				use tauri_plugin_notification::NotificationExt;
-				let enabled = app.state::<AppState>().settings.lock().unwrap().notifications;
+				let enabled = app.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).notifications;
 				if enabled {
 					let _ = app.notification().request_permission();
 				}
@@ -423,7 +423,7 @@ fn run_window(raw: String) -> i32 {
 		} => {
 			if label == "main" {
 				let state = app_handle.state::<AppState>();
-				let tray_enabled = state.settings.lock().unwrap().tray;
+				let tray_enabled = state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tray;
 				if tray_enabled && !update::quitting(app_handle) {
 					api.prevent_close();
 					if let Some(win) = app_handle.get_webview_window("main") {
@@ -431,7 +431,7 @@ fn run_window(raw: String) -> i32 {
 					}
 					// One-time hint so the user knows the app stayed alive.
 					if !update::tray_hide_hint_shown(app_handle) {
-						let notifications = app_handle.state::<AppState>().settings.lock().unwrap().notifications;
+						let notifications = app_handle.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).notifications;
 						update::mark_tray_hide_hint(app_handle);
 						if notifications {
 							update::notify(
