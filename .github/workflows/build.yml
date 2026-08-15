@@ -53,14 +53,23 @@ jobs:
             src-tauri/target/release/dsh-desktop-shell
             src-tauri/target/release/dsh-desktop-shell.exe
 
+  # Publish exactly one release from one job: the build matrix only uploads
+  # artifacts; this job downloads them all and creates the GitHub release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: bundle-*
+          merge-multiple: true
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
+          files: artifacts/**/*
           generate_release_notes: true
