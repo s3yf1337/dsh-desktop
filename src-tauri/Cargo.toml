@@ -3,6 +3,7 @@ name = "dsh-desktop-shell"
 version = "0.2.0"
 description = "DeepSeek Harness desktop render client: opens the dsh desktop profile's web surface in a native window."
 edition = "2021"
+authors = ["s3yf1337 <s3yf1337@users.noreply.github.com>"]
 
 # The render client is intentionally thin: it receives the served URL from the
 # desktop profile's desktop-shell plugin (`dsh-desktop-shell <url>`) and opens
