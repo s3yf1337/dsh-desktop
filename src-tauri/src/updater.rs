@@ -90,6 +90,15 @@ pub fn find_platform_asset(release: &GitHubRelease) -> Option<&ReleaseAsset> {
 		.find(|asset| asset.name.starts_with("dsh-desktop-v") && asset.name.contains(slug) && asset.name.ends_with(".tar.gz"))
 }
 
+/// The `.sha256` checksum asset accompanying `tarball_name` — exactly named
+/// `<tarball_name>.sha256` (produced by the CI pack step).
+pub fn find_checksum_asset<'a>(release: &'a GitHubRelease, tarball_name: &str) -> Option<&'a ReleaseAsset> {
+	release
+		.assets
+		.iter()
+		.find(|asset| asset.name == format!("{tarball_name}.sha256"))
+}
+
 /// Query GitHub for the latest non-draft, non-prerelease release.
 ///
 /// Returns `Ok(None)` when the repo has no releases yet (404) — that is the
@@ -98,6 +107,13 @@ pub async fn fetch_latest() -> Result<Option<GitHubRelease>, String> {
 	let client = reqwest::Client::builder()
 		.user_agent(concat!("dsh-desktop/", env!("CARGO_PKG_VERSION")))
 		.timeout(std::time::Duration::from_secs(15))
+		.redirect(reqwest::redirect::Policy::custom(|attempt| {
+			if attempt.url().scheme() == "https" {
+				attempt.follow()
+			} else {
+				attempt.stop()
+			}
+		}))
 		.build()
 		.map_err(|error| format!("http client: {error}"))?;
 	let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
