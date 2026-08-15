@@ -662,6 +662,10 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			const creatingRef = useRef(null); creatingRef.current = creating;
 			const searchRef = useRef(null); searchRef.current = search;
 			const prevRef = useRef(null); prevRef.current = prevSnapshot;
+			// Sequence guards against stale async responses overwriting fresher
+			// state (live refresh racing navigation, and previews overwriting later previews).
+			const loadSeqRef = useRef(0);
+			const previewSeqRef = useRef(0);
 
 			useEffect(() => explorerStore.subscribe(() => {
 				setOpen(explorerStore.open);
@@ -821,10 +825,14 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			}, [currentWorkspace, currentWorkspacePath]);
 
 			const loadDir = useCallback(async (path) => {
+				const seq = ++loadSeqRef.current;
 				setBusy(true);
 				setError(null);
 				try {
 					const list = await window.__TAURI__.core.invoke("desktop_list_dir", { path });
+					// A stale response (a newer loadDir superseded ours) must not
+					// overwrite fresher directory state.
+					if (seq !== loadSeqRef.current) return false;
 					// A fresh directory starts an unmarked baseline; refreshing
 					// the same directory marks what changed since last view.
 					const prev = path === cwdRef.current ? prevRef.current : null;
