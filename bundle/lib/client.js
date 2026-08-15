@@ -1109,11 +1109,21 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			};
 
 			// ── workspace chip (Е) ──
-			const chipItems = (workspaceSnapshot?.items || []).map((item, index) => {
-				const view = workspaceView(item);
-				const path = view && typeof view.path === "string" ? view.path : "";
-				return { id: "ws-" + index, label: workspaceTitleOf(item) || (path ? baseName(path) : "Workspace"), icon: h(IconFolderClose16, {}) };
-			});
+			const chipItems = [
+				{ type: "label", id: "ws-label", text: "Jump to a workspace folder" },
+				...(workspaceSnapshot?.items || []).map((item, index) => {
+					const view = workspaceView(item);
+					const path = view && typeof view.path === "string" ? view.path : "";
+					const title = workspaceTitleOf(item) || (path ? baseName(path) : "Workspace");
+					return {
+						id: "ws-" + index,
+						label: h("span", { style: { display: "flex", alignItems: "baseline", gap: 6, minWidth: 0 } },
+							h("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, title),
+							path !== "" ? h("span", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, path) : null),
+						icon: h(IconFolderClose16, {})
+					};
+				})
+			];
 			const chipSelected = currentWorkspace === null ? void 0 : "ws-" + (workspaceSnapshot?.items?.indexOf(currentWorkspace) ?? -1);
 
 			const openChipMenu = (event) => {
@@ -1658,7 +1668,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 							// row so the path keeps the full width.
 							!picking
 								? h("div", { style: statusBarStyle },
-										h("button", { type: "button", className: "dshd-round", title: "Workspaces", style: chipStyle, onClick: openChipMenu },
+										h("button", { type: "button", className: "dshd-round", title: "Jump to a workspace folder", style: chipStyle, onClick: openChipMenu },
 											h(IconFolderClose16, {}),
 											h("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, currentWorkspaceTitle))
 									)
