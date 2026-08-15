@@ -1,50 +1,106 @@
 # dsh-desktop
 
-DeepSeek Harness running in a native desktop window (Tauri), with a tray icon,
-native notifications, and close-to-tray behavior.
+**DeepSeek Harness in a native desktop window — built the way the harness
+itself is built: as a plugin, not a fork.**
 
 [![build](https://github.com/s3yf1337/dsh-desktop/actions/workflows/build.yml/badge.svg)](https://github.com/s3yf1337/dsh-desktop/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/s3yf1337/dsh-desktop?sort=semver&label=release)](https://github.com/s3yf1337/dsh-desktop/releases)
 [![license](https://img.shields.io/github/license/s3yf1337/dsh-desktop)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Linux%20%E2%80%A2%20macOS%20%E2%80%A2%20Windows-2ea44f)](#)
+[![dsh](https://img.shields.io/badge/dsh-plugin-4F46E5)](#)
+
+`dsh-desktop` is a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+profile that composes the standard bundles (`dsh-base` + `dsh-web-app`) with a
+small plugin — this repo's `dsh-desktop-shell` — which opens the harness web
+surface in a native Tauri window: custom title bar, tray icon, native
+notifications, a real file-manager panel, and one-click updates.
+
+## The idea: desktop as a plugin
+
+DeepSeek Harness is built on the principle that *everything is a plugin*:
+models, tools, sandboxes, session storage, the UI — even the agent loop
+itself. The desktop experience should follow the same rule.
+
+This project adds a native window **without forking or repackaging the
+harness**. The profile is plain composition:
+
+```
+dsh --profile desktop      →   dsh-base + dsh-web-app + dsh-desktop-shell
+```
+
+That one decision buys a lot:
+
+- **Always in sync.** The harness keeps updating; so do you. There is no fork
+  to rebase and no bundled copy to refresh — upstream releases land in your
+  profile exactly the way they always do.
+- **Composable.** The shell is one row in your profile's bundle list. Keep
+  your other bundles, swap the web app, add plugins — the desktop layer stays
+  a layer, not a replacement.
+- **Small.** The native client is a Tauri binary, not a bundled browser plus a
+  full runtime. Your dsh stays your dsh.
+- **Honest trade-off.** The plugin approach assumes you already run `dsh`. If
+  you want a single installer with zero prerequisites, a standalone app that
+  bundles its own runtime is the better fit. If you want the desktop to be
+  *part of* your harness — same config, same workspaces, same plugins — this
+  is the one that fits.
 
 ## Features
 
-- Runs the harness in its own native window with an app icon in the dock/taskbar.
-- Custom title bar (drag region, minimize/maximize/close) drawn by the web
-  surface, matching the app theme on every platform.
-- Right-hand explorer panel — a real file manager: browse any folder (not
-  just the workspace) with breadcrumbs, back/forward, name filter and
-  recursive search, sort by name/size/date; right-click or keyboard
-  (F2 rename, Del to trash, arrows) to create, rename, copy, cut, paste,
-  delete, open externally; files changed or created since your last look
-  are marked live (auto-refresh). **Preview** tab shows text, code, and
-  images (1 MiB / 8 MiB caps).
-- The panel is wired into the harness: right-click a file → *Send path to
-  agent* inserts its (workspace-relative) path into the composer, images
-  can be attached to a message, and the workspace picker (hero + sidebar +
-  settings) is the panel in "choose a folder" mode instead of an OS dialog.
-- Closing the window hides it to the tray; running agents keep working.
-- Native notifications on agent finish, error, and question events.
-- One-click updates: download, apply, restart. Nothing is applied
+- **Native window** with an app icon in the dock/taskbar and a custom title
+  bar (drag region, minimize/maximize/close) drawn by the web surface,
+  matching the app theme on every platform. The window title follows the
+  chat open in the UI right now (the SPA's `document.title`), not the last
+  started agent.
+- **Explorer panel — a real file manager.** Browse any folder (not just the
+  workspace) with breadcrumbs, back/forward, name filter and recursive
+  search, sort by name/size/date. Right-click or keyboard (F2 rename, Del to
+  trash, arrows) to create, rename, copy, cut, paste, delete, open
+  externally. Files changed or created since your last look are marked live
+  (auto-refresh). A **Preview** tab shows text, code, and images (1 MiB /
+  8 MiB caps).
+- **Wired into the harness.** Right-click a file → *Send path to agent*
+  inserts its workspace-relative path into the composer; images can be
+  attached to a message; the workspace picker (hero + sidebar + settings) is
+  the panel in "choose a folder" mode instead of an OS dialog.
+- **Tray + close-to-tray.** Closing the window hides it; running agents keep
+  working.
+- **Native notifications** on agent finish, error, and question events.
+- **One-click updates.** Download, apply, restart. Nothing is applied
   automatically; background checks are opt-in (off by default).
-- Workspace selection via the OS folder dialog, or drag-and-drop a folder into
-  the window.
-- A **dsh-desktop** tab inside the harness Settings for desktop preferences.
+- **Workspace selection** via the OS folder dialog, or drag-and-drop a folder
+  into the window.
+- **A `dsh-desktop` tab** inside the harness Settings for desktop
+  preferences.
 
 ## Install
 
-Requires the `dsh` CLI (and Rust, only for the first build):
+**Requires** the `dsh` CLI. Rust is needed only for the first build from
+source — prebuilt client binaries skip it.
+
+Pre-built installers per platform — `.deb` (Linux), `.dmg` (macOS), NSIS
+`.exe` (Windows) — are published on the
+[releases](https://github.com/s3yf1337/dsh-desktop/releases) page. One
+installer places the client binary and registers an app-menu entry; the
+first launch bootstraps the desktop profile into dsh and opens the window.
+
+From source (Linux/macOS dev path):
 
 ```sh
 git clone https://github.com/s3yf1337/dsh-desktop && cd dsh-desktop
-./install.sh
+./install.sh              # full bootstrap (builds the client if needed)
+./install.sh --no-build   # use an existing client binary, never build
+./install.sh --rebuild    # force a client rebuild
 dsh-desktop
 ```
 
-Pre-built installers per platform (`.deb` on Linux, `.dmg` on macOS, NSIS
-`.exe` on Windows) are published on the
-[releases](https://github.com/s3yf1337/dsh-desktop/releases) page.
+The client binary itself is also a plugin installer:
+
+```sh
+dsh-desktop-shell install              # bootstrap the profile + install client/launcher
+dsh-desktop-shell install --prefix /usr  # OS-package layout (menus under /usr/share)
+dsh-desktop-shell                      # install, then boot the profile
+dsh-desktop-shell --version
+```
 
 Runs on Linux, macOS, and Windows.
 
@@ -71,8 +127,11 @@ standard bundles (`dsh-base` + `dsh-web-app`) plus this repo's
 served loopback URL; the WebView loads the exact same `127.0.0.1` origin a
 browser would, so the whole SPA works unchanged and same-origin. The client
 exposes `window.__TAURI__` to that origin (`withGlobalTauri`), and the plugin
-pipes agent-lifecycle events to the client over a stdin control channel
-(`{"event":"notify"|"title", ...}` JSON lines).
+pipes agent-lifecycle notifications to the client over a stdin control
+channel (`{"event":"notify", ...}` JSON lines). The window title follows the
+chat open in the web UI: the app shell sets `document.title` to the active
+chat's title, and the client mirrors it into the native window and the
+custom title bar.
 
 #### Install options
 
@@ -80,7 +139,7 @@ pipes agent-lifecycle events to the client over a stdin control channel
 page): `.deb` on Linux, `.dmg` on macOS, `.exe` (NSIS) on Windows. The
 installer places the client binary and registers an app-menu entry; the first
 launch of the installed app bootstraps the plugin profile into dsh and opens
-the window. The client binary itself is also a plugin installer:
+the window. The client binary is also a plugin installer:
 
 ```sh
 dsh-desktop-shell install            # bootstrap the profile + install client/launcher
