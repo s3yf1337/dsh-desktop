@@ -88,8 +88,18 @@ pub fn save(config_dir: &PathBuf, settings: &DesktopSettings) {
 	}
 	match serde_json::to_string_pretty(settings) {
 		Ok(raw) => {
-			if let Err(error) = fs::write(&path, raw) {
-				eprintln!("dsh-desktop: cannot persist settings: {error}");
+			// Write to a sibling temp file, then rename over the target: on the
+			// same filesystem rename is atomic, so a crash mid-write never
+			// leaves a truncated/empty settings file behind.
+			let tmp = path.with_extension("json.tmp");
+			match fs::write(&tmp, raw) {
+				Ok(()) => {
+					if let Err(error) = fs::rename(&tmp, &path) {
+						eprintln!("dsh-desktop: cannot persist settings: {error}");
+						let _ = fs::remove_file(&tmp);
+					}
+				}
+				Err(error) => eprintln!("dsh-desktop: cannot persist settings: {error}"),
 			}
 		}
 		Err(error) => eprintln!("dsh-desktop: cannot serialize settings: {error}"),
