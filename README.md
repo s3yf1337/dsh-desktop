@@ -1,5 +1,7 @@
 # dsh-desktop
 
+[![build](https://github.com/s3yf1337/dsh-desktop/actions/workflows/build.yml/badge.svg)](https://github.com/s3yf1337/dsh-desktop/actions/workflows/build.yml)
+
 The **desktop profile** for the DeepSeek Harness — a real profile composed
 from the standard plugin bundles, exactly like `web` or `headless`, with a
 native window.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DeepSeek Harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "ai.deepseek.harness.desktop",
   "build": {
     "frontendDist": "../dist"
@@ -30,6 +30,15 @@
     "active": true,
     "targets": "all",
     "category": "DeveloperTool",
-    "shortDescription": "DeepSeek Harness desktop shell"
+    "shortDescription": "DeepSeek Harness desktop shell",
+    "publisher": "s3yf1337",
+    "maintainer": "s3yf1337 <s3yf1337@users.noreply.github.com>",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }
