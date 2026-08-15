@@ -18,7 +18,9 @@ pub struct DesktopSettings {
 	pub tray: bool,
 	/// Native OS notifications (update available, first hide hint, tests).
 	pub notifications: bool,
-	/// Periodically check GitHub releases for a newer version.
+	/// Periodically check GitHub releases for a newer version. Defaults to
+	/// off: updates are a one-click action the user triggers; background
+	/// checking only happens when explicitly enabled.
 	pub auto_update_check: bool,
 	/// How often to re-check, in hours (only when auto_update_check is on).
 	pub update_interval_hours: u64,
@@ -31,7 +33,7 @@ impl Default for DesktopSettings {
 		Self {
 			tray: true,
 			notifications: true,
-			auto_update_check: true,
+			auto_update_check: false,
 			update_interval_hours: 6,
 			tray_hide_hint_shown: false,
 		}

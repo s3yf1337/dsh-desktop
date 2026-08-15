@@ -23,6 +23,8 @@
 //! tab through the `desktop_*` commands.
 
 mod commands;
+mod fs;
+mod install;
 mod log;
 mod settings;
 mod tray;
@@ -33,8 +35,13 @@ use std::env;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use url::Url;
+
+/// The process exit code the profile plugin reads (0 = done, 11 = restart).
+/// Set before `app.exit(code)`; the window-mode run returns it after the
+/// event loop ends.
+pub static EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// Process-wide desktop state (native only; the SPA reads snapshots of it).
 pub struct AppState {
@@ -69,29 +76,143 @@ impl Default for AppState {
 /// window on it. The process exits with code 0 when the user is done (Quit
 /// from the tray, or a close while the tray is disabled).
 pub fn run() {
-	let mut args = env::args().skip(1);
-	let Some(raw) = args.next() else {
-		eprintln!("usage: dsh-desktop-shell <url>");
-		eprintln!("the desktop profile spawns this client with the served web URL");
-		std::process::exit(2);
+	// The binary doubles as the plugin installer:
+	//   dsh-desktop-shell install [--prefix DIR]   bootstrap the desktop profile
+	//   dsh-desktop-shell                           same, then boot the profile
+	//   dsh-desktop-shell <url>                     render the web surface (window)
+	//   dsh-desktop-shell --version | --help
+	let args: Vec<String> = env::args().skip(1).collect();
+	let exit = match args.first().map(|s| s.as_str()) {
+		Some("install") => {
+			let mut prefix = None;
+			let mut rest = args.iter().skip(1).peekable();
+			while let Some(arg) = rest.next() {
+				match arg.as_str() {
+					"--prefix" => prefix = rest.next().map(|s| s.clone()),
+					"--help" | "-h" => {
+						println!("usage: dsh-desktop-shell install [--prefix DIR]");
+						return;
+					}
+					other => {
+						eprintln!("error: unknown install argument: {other}");
+						return std::process::exit(2);
+					}
+				}
+			}
+			install::run(prefix.as_deref())
+		}
+		Some("--version") | Some("-V") => {
+			println!("dsh-desktop-shell {}", env!("CARGO_PKG_VERSION"));
+			0
+		}
+		Some("--help") | Some("-h") | Some("help") => {
+			println!("usage: dsh-desktop-shell <url> | install [--prefix DIR] | --version");
+			0
+		}
+		Some(raw) if !raw.starts_with('-') => run_window(raw.to_string()),
+		_ => run_installed_app(),
 	};
+	std::process::exit(exit);
+}
+
+/// The OS-installed app launched by hand (no URL): run the plugin installer,
+/// then boot the profile — the profile's plugin spawns this client with the
+/// served URL. This is what the OS installers' shortcuts point at, so
+/// double-clicking the installed app installs the plugin into dsh and opens
+/// the window in one go.
+fn run_installed_app() -> i32 {
+	let prefix = env::var("DSH_DESKTOP_PREFIX").ok();
+	if let Err(error) = install::install(prefix.as_deref()) {
+		eprintln!("dsh-desktop: {error}");
+		eprintln!("dsh-desktop: install the dsh CLI first (npm i -g @deepseek-ai/dsh) and try again");
+		return 1;
+	}
+	match spawn_profile() {
+		Ok(()) => {
+			// The freshly booted harness spawns a new client instance with the
+			// served URL; this bootstrap process is done.
+			0
+		}
+		Err(error) => {
+			eprintln!("dsh-desktop: cannot boot the desktop profile: {error}");
+			eprintln!("dsh-desktop: the profile is installed — run: dsh --profile desktop");
+			1
+		}
+	}
+}
+
+/// Resolve the `dsh` CLI like the launcher script does: `DSH_DESKTOP_DSH` →
+/// `DSH_BIN` → `dsh` on PATH → known install locations.
+fn resolve_dsh() -> Option<String> {
+	for key in ["DSH_DESKTOP_DSH", "DSH_BIN"] {
+		if let Ok(value) = env::var(key) {
+			if !value.trim().is_empty() {
+				return Some(value);
+			}
+		}
+	}
+	if let Ok(path) = env::var("PATH") {
+		for dir in path.split(if cfg!(target_os = "windows") { ';' } else { ':' }) {
+			if dir.is_empty() {
+				continue;
+			}
+			let candidate = std::path::Path::new(dir).join(if cfg!(target_os = "windows") { "dsh.cmd" } else { "dsh" });
+			if candidate.exists() {
+				return Some(candidate.to_string_lossy().into_owned());
+			}
+		}
+	}
+	for candidate in ["$HOME/.npm-global/bin/dsh", "$HOME/.local/bin/dsh", "$HOME/bin/dsh"] {
+		let expanded = candidate.replace("$HOME", &env::var("HOME").unwrap_or_default());
+		if std::path::Path::new(&expanded).exists() {
+			return Some(expanded);
+		}
+	}
+	None
+}
+
+/// Spawn `dsh --profile desktop` detached (the profile plugin opens the
+/// window). Returns once the spawn succeeds; the child owns the app now.
+fn spawn_profile() -> Result<(), String> {
+	let dsh = resolve_dsh().ok_or_else(|| "dsh CLI not found on PATH (DSH_DESKTOP_DSH, DSH_BIN, or dsh on PATH)".to_string())?;
+	let mut command = std::process::Command::new(&dsh);
+	command.arg("--profile").arg("desktop");
+	#[cfg(not(target_os = "windows"))]
+	{
+		use std::os::unix::process::CommandExt;
+		command.process_group(0);
+	}
+	command
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.stdin(std::process::Stdio::null())
+		.spawn()
+		.map(|_| ())
+		.map_err(|error| format!("cannot start {dsh}: {error}"))
+}
+
+/// Window mode: open the native window on the served loopback URL.
+fn run_window(raw: String) -> i32 {
 	if raw.trim().is_empty() {
 		eprintln!("error: empty URL");
-		std::process::exit(2);
+		return 2;
 	}
 	let url = match Url::parse(raw.trim()) {
 		Ok(parsed) => parsed,
 		Err(error) => {
 			eprintln!("error: invalid URL {raw:?}: {error}");
-			std::process::exit(2);
+			return 2;
 		}
 	};
 	// The shell only ever renders the harness's loopback surface; anything
 	// else is a mistake (defense in depth — the URL is built by the plugin).
 	if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") {
 		eprintln!("error: refusing to open non-loopback URL {raw:?}");
-		std::process::exit(2);
+		return 2;
 	}
+
+	// Leftover `.old` from a Windows in-place update (rename-before-replace).
+	install::cleanup_stale_old();
 
 	let mut builder = tauri::Builder::default();
 
@@ -133,6 +254,12 @@ pub fn run() {
 			commands::desktop_test_notification,
 			commands::desktop_pick_directory,
 			commands::desktop_is_directory,
+			commands::desktop_update_now,
+			commands::desktop_install_info,
+			fs::desktop_list_dir,
+			fs::desktop_parent_dir,
+			fs::desktop_read_file,
+			fs::desktop_home_dir,
 		])
 		.setup(|app| {
 			// reqwest is built with `rustls-no-provider`; ring is the provider.
@@ -209,11 +336,13 @@ pub fn run() {
 							}
 							Some("title") => {
 								let title = message.get("title").and_then(|v| v.as_str());
+								let title = title.filter(|t| !t.is_empty()).unwrap_or("DeepSeek Harness");
 								if let Some(win) = handle.get_webview_window("main") {
-									let _ = win.set_title(
-										title.filter(|t| !t.is_empty()).unwrap_or("DeepSeek Harness"),
-									);
+									let _ = win.set_title(title);
 								}
+								// The custom title bar renders its own caption; mirror
+								// the native title into the webview.
+								let _ = handle.emit(update::TITLE_EVENT, title);
 							}
 							_ => {}
 						}
@@ -275,4 +404,5 @@ pub fn run() {
 		}
 		_ => {}
 	});
+	EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst)
 }

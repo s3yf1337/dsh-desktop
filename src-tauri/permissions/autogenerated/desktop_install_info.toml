@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-install-info"
+description = "Enables the desktop_install_info command without any pre-configured scope."
+commands.allow = ["desktop_install_info"]
+
+[[permission]]
+identifier = "deny-desktop-install-info"
+description = "Denies the desktop_install_info command without any pre-configured scope."
+commands.deny = ["desktop_install_info"]

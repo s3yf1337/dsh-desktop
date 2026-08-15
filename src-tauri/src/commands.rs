@@ -121,6 +121,35 @@ pub fn desktop_open_release(app: AppHandle) -> Result<(), String> {
 	open::that(&url).map_err(|error| error.to_string())
 }
 
+/// One-click update: download the platform package, apply it in place, and
+/// restart the app (exit code 11 → the profile plugin relaunches the
+/// harness). Progress is streamed on `desktop://update-progress`.
+#[tauri::command]
+pub async fn desktop_update_now(app: AppHandle) -> Result<serde_json::Value, String> {
+	let version = crate::update::download_and_apply(&app).await?;
+	// Let the final progress event flush, then tell the profile plugin to
+	// relaunch us (the plugin sees exit code 11 and starts a fresh profile).
+	crate::update::emit_progress(&app, "restarting", None, None);
+	crate::log::info(&app, "update applied; requesting restart");
+	// The process exit code is what the profile plugin sees: 11 = relaunch.
+	crate::EXIT_CODE.store(crate::update::RESTART_EXIT_CODE, std::sync::atomic::Ordering::SeqCst);
+	tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+	app.exit(crate::update::RESTART_EXIT_CODE);
+	Ok(serde_json::json!({ "restarting": true, "version": version }))
+}
+
+/// Where the plugin is installed (paths for the settings tab's "Installation"
+/// card and diagnostics).
+#[tauri::command]
+pub fn desktop_install_info() -> Result<serde_json::Value, String> {
+	Ok(serde_json::json!({
+		"dsh_home": crate::install::dsh_home().to_string_lossy(),
+		"profile": crate::install::profile_dir().to_string_lossy(),
+		"bundle": crate::install::profile_bundle_dir().to_string_lossy(),
+		"client": std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+	}))
+}
+
 /// Reset the window to the default size/position and forget the saved
 /// geometry (the window-state plugin's file is removed).
 #[tauri::command]

@@ -33,13 +33,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 # GitHub releases API client (HTTPS via rustls + ring; no OpenSSL).
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 semver = { version = "1", features = ["serde"] }
 # Open the browser on the release page ("suggest update" is the whole point).
 open = "5"
-# Periodic updater sleeps (tauri's async runtime is tokio underneath).
-tokio = { version = "1", features = ["time"] }
+# Periodic updater sleeps + update download/apply (tauri's async runtime is
+# tokio underneath).
+tokio = { version = "1", features = ["time", "fs", "io-util"] }
+# One-click update: the release ships a per-platform tar.gz (client binary +
+# plugin bundle); these extract it.
+flate2 = "1"
+tar = "0.4"
+# Stream helper for the update download (reqwest's `bytes_stream`).
+futures-util = "0.3"
 
 # Local patch: tao unconditionally installs its own GtkHeaderBar (CSD
 # titlebar) on every Wayland window, forcing a GNOME-style header even on

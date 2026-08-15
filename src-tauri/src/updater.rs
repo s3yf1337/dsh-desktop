@@ -26,6 +26,68 @@ pub struct GitHubRelease {
 	pub draft: Option<bool>,
 	#[serde(default)]
 	pub prerelease: Option<bool>,
+	#[serde(default)]
+	pub assets: Vec<ReleaseAsset>,
+}
+
+/// One downloadable asset of a release.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ReleaseAsset {
+	#[serde(default)]
+	pub name: String,
+	#[serde(default)]
+	pub browser_download_url: String,
+	#[serde(default)]
+	pub size: u64,
+}
+
+/// The platform slug used in release artifact names, e.g. `linux-x86_64`
+/// (matches the CI-produced `dsh-desktop-<tag>-<slug>.tar.gz` tarballs).
+pub fn platform_slug() -> &'static str {
+	#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+	{
+		"linux-x86_64"
+	}
+	#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+	{
+		"linux-aarch64"
+	}
+	#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+	{
+		"macos-aarch64"
+	}
+	#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+	{
+		"macos-x86_64"
+	}
+	#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+	{
+		"windows-x86_64"
+	}
+	#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+	{
+		"windows-aarch64"
+	}
+	#[cfg(not(any(
+		all(target_os = "linux", target_arch = "x86_64"),
+		all(target_os = "linux", target_arch = "aarch64"),
+		all(target_os = "macos", target_arch = "aarch64"),
+		all(target_os = "macos", target_arch = "x86_64"),
+		all(target_os = "windows", target_arch = "x86_64"),
+		all(target_os = "windows", target_arch = "aarch64"),
+	)))]
+	{
+		"unknown"
+	}
+}
+
+/// The tarball asset for this platform: `dsh-desktop-v<tag>-<slug>.tar.gz`.
+pub fn find_platform_asset(release: &GitHubRelease) -> Option<&ReleaseAsset> {
+	let slug = platform_slug();
+	release
+		.assets
+		.iter()
+		.find(|asset| asset.name.starts_with("dsh-desktop-v") && asset.name.contains(slug) && asset.name.ends_with(".tar.gz"))
 }
 
 /// Query GitHub for the latest non-draft, non-prerelease release.
