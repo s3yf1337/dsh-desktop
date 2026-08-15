@@ -49,8 +49,9 @@ function findOnPath(bin) {
 	const pathEnv = process.env.PATH ?? "";
 	for (const dir of pathEnv.split(process.platform === "win32" ? ";" : ":")) {
 		if (dir === "") continue;
-		const candidate = join(dir, bin);
-		if (existsSync(candidate)) return candidate;
+		for (const candidate of [join(dir, bin), join(dir, bin + ".exe")]) {
+			if (existsSync(candidate)) return candidate;
+		}
 	}
 	return undefined;
 }
@@ -74,6 +75,10 @@ function resolveShellBinary(explicitBin) {
 		}
 		return value;
 	}
+	// The installers put the client in `$DSH_HOME/bin` (the same place the
+	// binary's own installer mode writes it), so that resolves first.
+	const homeBin = join(resolveDshHome(), "bin", process.platform === "win32" ? "dsh-desktop-shell.exe" : "dsh-desktop-shell");
+	if (existsSync(homeBin)) return homeBin;
 	const onPath = findOnPath("dsh-desktop-shell");
 	if (onPath !== void 0) return onPath;
 	const local = join(homedir(), ".local", "bin", "dsh-desktop-shell");
@@ -250,11 +255,43 @@ function apply(ctx, config) {
 				console.log("dsh desktop: window closed; shutting the harness down");
 				ctx.logger.info("desktop-shell: window closed; shutting the harness down");
 				if (exit !== void 0) exit(0);
+			} else if (code === 11) {
+				// The client applied a one-click update and asks for a
+				// restart: boot a fresh profile (it spawns the updated
+				// client), then shut the old harness down.
+				console.log("dsh desktop: update applied; restarting the profile");
+				ctx.logger.info("desktop-shell: update applied; restarting");
+				setTimeout(() => {
+					try {
+						relaunchProfile();
+					} catch (error) {
+						console.error(`dsh desktop: cannot restart the profile: ${error.message}`);
+						ctx.logger.error(`desktop-shell: cannot restart the profile: ${error.message}`);
+					}
+					if (exit !== void 0) exit(0);
+				}, 1500);
 			} else {
 				console.error(`dsh desktop: client exited with code ${code}; keeping the web surface at ${url}`);
 				ctx.logger.warn(`desktop-shell: client exited with code ${code}`);
 			}
 		});
+	};
+	// One-click update restart: resolve the `dsh` CLI exactly like the
+	// launcher script does (DSH_DESKTOP_DSH → DSH_BIN → PATH → known paths)
+	// and boot the profile detached; the fresh harness spawns the new client.
+	const relaunchProfile = () => {
+		const candidates = [
+			process.env.DSH_DESKTOP_DSH,
+			process.env.DSH_BIN,
+			"dsh"
+		].filter((value) => typeof value === "string" && value.trim() !== "");
+		if (candidates.length === 0) throw new Error("no dsh CLI found");
+		const profile = spawn(candidates[0], ["--profile", "desktop"], {
+			env: { ...process.env, DSH_HOME: resolveDshHome() },
+			stdio: "ignore",
+			detached: true
+		});
+		profile.unref();
 	};
 	if (settled === void 0) open();
 	else settled.then(open, () => {});

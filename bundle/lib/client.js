@@ -6,27 +6,615 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
-		//#region dsh-desktop settings tab
+		//#region shared
 		/**
-		* The "dsh-desktop" section of the Settings surface (browser half).
+		* dsh-desktop browser half: the custom window title bar (fully replaces
+		* the native one — the shell window is frameless), the right-hand
+		* explorer panel (Files / Preview tabs, like Hermes Agent, one at a
+		* time, hideable), and the "dsh-desktop" settings section.
 		*
-		* Registers one `settings.section` entry that renders the desktop shell's
-		* native preferences: tray (close-to-tray), OS notifications, the GitHub
-		* updater (suggest-only), and window geometry. All state lives in the
-		* native client (`dsh-desktop-shell`) and is reached through
-		* `window.__TAURI__` — the same origin a browser would load, so when the
-		* harness is opened in a plain browser this section renders a notice
+		* Everything desktop-specific is driven through `window.__TAURI__`
+		* commands; in a plain browser these surfaces degrade to a notice
 		* instead of dead controls.
 		*/
-		const { createElement: h, useState, useEffect, useCallback } = react;
-		const { Button, IconDownloadOutline16, IconRefreshOutline14, IconGlobeOutline14, IconSettingsOutline16, IconFolderOpenOutline16 } =
-			_deepseek_ai_dsh_client_ui_primitives;
+		const { createElement: h, useState, useEffect, useCallback, useMemo, useRef } = react;
+		const {
+			Button,
+			IconDownloadOutline16,
+			IconRefreshOutline14,
+			IconGlobeOutline14,
+			IconSettingsOutline16,
+			IconFolderOpenOutline16,
+			IconFolderOpen16,
+			IconChevronLeftOutline14,
+			IconChevronRightOutline14,
+			IconCloseOutline16,
+			IconCodeOutline16,
+			IconDataOutline16,
+			IconSearchOutline16,
+			IconPanelLeftOutline16
+		} = _deepseek_ai_dsh_client_ui_primitives;
 
 		const NS = "desktopShell";
 		const inject = ["slots", "workspaces"];
 
 		const STATE_EVENT = "desktop://state";
+		const UPDATE_PROGRESS_EVENT = "desktop://update-progress";
+		const TITLE_EVENT = "desktop://title";
 
+		/** Height of the custom title bar (kept in sync with the CSS). */
+		const TITLEBAR_HEIGHT = 40;
+
+		/** True when running inside the native window (tauri injected). */
+		function hasTauri() {
+			return typeof window !== "undefined" && window.__TAURI__ !== void 0 && window.__TAURI__.core !== void 0;
+		}
+
+		/** True when running on macOS (traffic-light-style controls). */
+		function isMac() {
+			return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+		}
+
+		/** Shared explorer panel state (the DOM title bar and the React panel
+		* communicate through this tiny store). */
+		const explorerStore = {
+			open: false,
+			tab: "files",
+			listeners: new Set(),
+			init() {
+				if (typeof localStorage === "undefined") return;
+				this.open = localStorage.getItem("dshd.explorer.open") === "1";
+				this.tab = localStorage.getItem("dshd.explorer.tab") === "preview" ? "preview" : "files";
+			},
+			setOpen(open) {
+				this.open = !!open;
+				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.open", this.open ? "1" : "0");
+				this.notify();
+			},
+			toggle() {
+				this.setOpen(!this.open);
+			},
+			setTab(tab) {
+				this.tab = tab;
+				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.tab", tab);
+				this.notify();
+			},
+			subscribe(fn) {
+				this.listeners.add(fn);
+				return () => this.listeners.delete(fn);
+			},
+			notify() {
+				for (const fn of this.listeners) fn();
+			}
+		};
+		//#endregion
+
+		//#region custom title bar (plain DOM, fixed to the viewport top)
+		const TITLEBAR_CSS = `
+#dshd-titlebar{position:fixed;top:0;left:0;right:0;height:${TITLEBAR_HEIGHT}px;z-index:9999;display:flex;align-items:center;justify-content:space-between;background:var(--dsw-alias-bg-base);border-bottom:1px solid var(--dsw-alias-border-l1);-webkit-app-region:drag;user-select:none;font-family:var(--dsw-font-family)}
+#dshd-titlebar .dshd-left{display:flex;align-items:center;gap:8px;padding-left:10px;min-width:0;height:100%}
+#dshd-titlebar .dshd-logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#1f6feb,#388bfd);display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;flex:none}
+#dshd-titlebar .dshd-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1}
+#dshd-titlebar .dshd-actions{display:flex;align-items:center;height:100%;-webkit-app-region:no-drag}
+#dshd-titlebar button{-webkit-app-region:no-drag;border:none;background:transparent;width:44px;height:100%;display:grid;place-items:center;cursor:default;color:var(--dsw-alias-label-secondary);padding:0}
+#dshd-titlebar button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+#dshd-titlebar button.dshd-close:hover{background:var(--dsw-static-red-600);color:#fff}
+#dshd-titlebar button svg{display:block}
+body.dshd-frameless #root{padding-top:${TITLEBAR_HEIGHT}px;box-sizing:border-box}
+#dshd-resize-e{position:fixed;top:${TITLEBAR_HEIGHT}px;right:0;bottom:0;width:5px;z-index:9998;cursor:ew-resize}
+#dshd-resize-w{position:fixed;top:${TITLEBAR_HEIGHT}px;left:0;bottom:0;width:5px;z-index:9998;cursor:ew-resize}
+#dshd-resize-n{position:fixed;top:0;left:0;right:0;height:5px;z-index:9998;cursor:ns-resize}
+#dshd-resize-s{position:fixed;left:0;right:0;bottom:0;height:5px;z-index:9998;cursor:ns-resize}
+#dshd-resize-ne{position:fixed;top:0;right:0;width:9px;height:9px;z-index:9999;cursor:nesw-resize}
+#dshd-resize-nw{position:fixed;top:0;left:0;width:9px;height:9px;z-index:9999;cursor:nwse-resize}
+#dshd-resize-se{position:fixed;right:0;bottom:0;width:9px;height:9px;z-index:9999;cursor:nwse-resize}
+#dshd-resize-sw{position:fixed;left:0;bottom:0;width:9px;height:9px;z-index:9999;cursor:nesw-resize}
+`;
+
+		function svgIcon(path, size = 12) {
+			const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+			el.setAttribute("width", size);
+			el.setAttribute("height", size);
+			el.setAttribute("viewBox", "0 0 16 16");
+			el.setAttribute("fill", "none");
+			el.setAttribute("stroke", "currentColor");
+			el.setAttribute("stroke-width", "1.2");
+			el.setAttribute("stroke-linecap", "round");
+			el.innerHTML = path;
+			return el;
+		}
+
+		/** Mount the title bar + window controls + resize edges (native only). */
+		function installTitlebar() {
+			if (!hasTauri() || typeof document === "undefined" || document.getElementById("dshd-titlebar")) return;
+			// Icons are created here (they need the DOM; also keeps the module
+			// loadable in DOM-less environments).
+			const ICON_MIN = svgIcon(`<line x1="3" y1="8" x2="13" y2="8"/>`);
+			const ICON_MAX = svgIcon(`<rect x="3.2" y="3.2" width="9.6" height="9.6" rx="1.4"/>`);
+			const ICON_RESTORE = svgIcon(`<rect x="3.4" y="5.6" width="7" height="7" rx="1.2"/><path d="M6 4.6V3.8c0-.8.6-1.4 1.4-1.4h4.8c.8 0 1.4.6 1.4 1.4v4.8c0 .8-.6 1.4-1.4 1.4h-.8"/>`);
+			const ICON_CLOSE = svgIcon(`<path d="M4 4l8 8M12 4l-8 8"/>`);
+			const ICON_FOLDER = svgIcon(`<path d="M2.4 4.4c0-.8.6-1.4 1.4-1.4h2.2l1.5 1.6h4.7c.8 0 1.4.6 1.4 1.4v5.6c0 .8-.6 1.4-1.4 1.4H3.8c-.8 0-1.4-.6-1.4-1.4V4.4z"/>`, 13);
+			const style = document.createElement("style");
+			style.textContent = TITLEBAR_CSS;
+			document.head.appendChild(style);
+			document.body.classList.add("dshd-frameless");
+
+			const bar = document.createElement("div");
+			bar.id = "dshd-titlebar";
+			bar.setAttribute("data-tauri-drag-region", "");
+			bar.innerHTML = `
+				<div class="dshd-left">
+					<div class="dshd-logo">DH</div>
+					<div class="dshd-title">DeepSeek Harness</div>
+				</div>
+				<div class="dshd-actions"></div>`;
+			document.body.appendChild(bar);
+
+			const actions = bar.querySelector(".dshd-actions");
+			const stopDrag = (event) => {
+				event.stopPropagation();
+			};
+			const mkButton = (icon, title, onClick, extraClass) => {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.title = title;
+				button.className = extraClass || "";
+				button.appendChild(icon.cloneNode(true));
+				button.addEventListener("mousedown", stopDrag);
+				button.addEventListener("click", (event) => {
+					event.stopPropagation();
+					onClick();
+				});
+				return button;
+			};
+
+			const win = () => window.__TAURI__.window.getCurrentWindow();
+
+			// Explorer panel toggle (file manager / preview).
+			const explorerButton = mkButton(ICON_FOLDER, "File manager & preview", () => explorerStore.toggle());
+			explorerButton.style.opacity = explorerStore.open ? "1" : "0.72";
+			explorerStore.subscribe(() => {
+				explorerButton.style.opacity = explorerStore.open ? "1" : "0.72";
+			});
+
+			// macOS: traffic-light-style controls on the left, explorer on the
+			// right; Windows/Linux: everything on the right.
+			const makeMacButton = (color, icon, title, onClick) => {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.title = title;
+				button.style.width = "14px";
+				button.style.height = "14px";
+				button.style.borderRadius = "50%";
+				button.style.margin = "0 4px";
+				button.style.background = color;
+				button.style.color = "rgba(0,0,0,.55)";
+				button.style.fontSize = "9px";
+				button.style.lineHeight = "14px";
+				button.style.display = "grid";
+				button.style.placeItems = "center";
+				button.style.opacity = "0.9";
+				button.appendChild(icon.cloneNode(true));
+				button.addEventListener("mousedown", stopDrag);
+				button.addEventListener("click", (event) => {
+					event.stopPropagation();
+					onClick();
+				});
+				return button;
+			};
+
+			const minButton = mkButton(ICON_MIN, "Minimize", () => win().minimize());
+			const maxButton = mkButton(ICON_MAX, "Maximize", () => win().toggleMaximize(), "dshd-max");
+			const closeButton = mkButton(ICON_CLOSE, "Close", () => win().close(), "dshd-close");
+
+			const refreshMaxIcon = () => {
+				win()
+					.isMaximized()
+					.then((maximized) => {
+						maxButton.replaceChildren(maximized ? ICON_RESTORE.cloneNode(true) : ICON_MAX.cloneNode(true));
+						maxButton.title = maximized ? "Restore" : "Maximize";
+					})
+					.catch(() => {});
+			};
+			refreshMaxIcon();
+			window.__TAURI__.event
+				.listen("tauri://resize", refreshMaxIcon)
+				.catch(() => {});
+
+			if (isMac()) {
+				const left = bar.querySelector(".dshd-left");
+				const macButtons = document.createElement("div");
+				macButtons.className = "dshd-mac";
+				macButtons.style.cssText = "display:flex;align-items:center;gap:0;margin-right:10px;-webkit-app-region:no-drag";
+				macButtons.appendChild(makeMacButton("#ff5f57", ICON_CLOSE.cloneNode(true), "Close", () => win().close()));
+				macButtons.appendChild(makeMacButton("#febc2e", svgIcon(`<line x1="5" y1="8" x2="11" y2="8"/>`), "Minimize", () => win().minimize()));
+				macButtons.appendChild(makeMacButton("#28c840", ICON_MAX.cloneNode(true), "Zoom", () => win().toggleMaximize()));
+				left.prepend(macButtons);
+				left.appendChild(explorerButton);
+				actions.appendChild(maxButton);
+			} else {
+				actions.appendChild(explorerButton);
+				actions.appendChild(minButton);
+				actions.appendChild(maxButton);
+				actions.appendChild(closeButton);
+			}
+
+			// Double-click the empty bar area toggles maximize (native habit).
+			bar.addEventListener("dblclick", (event) => {
+				if (event.target.closest("button")) return;
+				win().toggleMaximize();
+			});
+
+			// Session title (mirrored from the native window title).
+			window.__TAURI__.event
+				.listen(TITLE_EVENT, (event) => {
+					const node = bar.querySelector(".dshd-title");
+					if (node) node.textContent = typeof event.payload === "string" && event.payload ? event.payload : "DeepSeek Harness";
+				})
+				.catch(() => {});
+
+			// Resize edges (frameless windows have no native borders).
+			const edge = (id, direction) => {
+				const el = document.createElement("div");
+				el.id = id;
+				el.addEventListener("mousedown", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					win().startResizeDragging(direction).catch(() => {});
+				});
+				document.body.appendChild(el);
+			};
+			edge("dshd-resize-e", "East");
+			edge("dshd-resize-w", "West");
+			edge("dshd-resize-n", "North");
+			edge("dshd-resize-s", "South");
+			edge("dshd-resize-ne", "NorthEast");
+			edge("dshd-resize-nw", "NorthWest");
+			edge("dshd-resize-se", "SouthEast");
+			edge("dshd-resize-sw", "SouthWest");
+		}
+		//#endregion
+
+		//#region explorer panel (Files / Preview tabs, right-hand, hideable)
+		const EXPLORER_WIDTH = 340;
+
+		function formatSize(bytes) {
+			if (bytes === void 0 || bytes === null) return "";
+			if (bytes < 1024) return `${bytes} B`;
+			if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+			if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+			return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+		}
+
+		function formatTime(ms) {
+			if (!ms) return "";
+			const date = new Date(ms);
+			const now = new Date();
+			const sameDay = date.toDateString() === now.toDateString();
+			return sameDay
+				? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+				: date.toLocaleDateString([], { month: "short", day: "numeric" });
+		}
+
+		/**
+		* The right-hand explorer panel. Rendered into the `shell.overlay` slot
+		* (the app's full-frame overlay layer), docked to the right edge below
+		* the title bar. Two tabs — Files and Preview — with exactly one active
+		* at a time, and a close button that hides the whole panel.
+		*/
+		function ExplorerPanel({ workspaces, close }) {
+			const [open, setOpen] = useState(explorerStore.open);
+			const [tab, setTab] = useState(explorerStore.tab);
+			const [cwd, setCwd] = useState(null);
+			const [entries, setEntries] = useState(null);
+			const [error, setError] = useState(null);
+			const [preview, setPreview] = useState(null);
+			const [previewError, setPreviewError] = useState(null);
+			const [busy, setBusy] = useState(false);
+
+			useEffect(() => explorerStore.subscribe(() => {
+				setOpen(explorerStore.open);
+				setTab(explorerStore.tab);
+			}), []);
+
+			// Initial root: the current workspace directory, else home.
+			const root = useMemo(() => {
+				if (workspaces && typeof workspaces.list === "object" && workspaces.list !== null) {
+					try {
+						const snapshot = workspaces.list.getSnapshot();
+						for (const item of snapshot.items || []) {
+							const view = item && typeof item.getSnapshot === "function" ? item.getSnapshot().view : item && item.view;
+							if (view && typeof view.path === "string" && view.path !== "") return view.path;
+						}
+					} catch {
+						// fall through to home
+					}
+				}
+				return null;
+			}, [workspaces]);
+
+			const loadDir = useCallback(async (path) => {
+				setBusy(true);
+				setError(null);
+				try {
+					const list = await window.__TAURI__.core.invoke("desktop_list_dir", { path });
+					setCwd(path);
+					setEntries(list);
+				} catch (caught) {
+					setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
+					setEntries(null);
+				} finally {
+					setBusy(false);
+				}
+			}, []);
+
+			// (Re)open the panel → load the current directory.
+			useEffect(() => {
+				if (!open) return;
+				if (cwd !== null) {
+					loadDir(cwd);
+					return;
+				}
+				if (root !== null) {
+					loadDir(root);
+					return;
+				}
+				setBusy(true);
+				window.__TAURI__.core
+					.invoke("desktop_home_dir")
+					.then((home) => loadDir(home))
+					.catch((caught) => {
+						setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
+						setBusy(false);
+					});
+			}, [open, root, cwd, loadDir]);
+
+			const openFile = useCallback(async (path, name) => {
+				setPreviewError(null);
+				setPreview({ path, name, loading: true });
+				explorerStore.setTab("preview");
+				try {
+					const content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
+					setPreview({ path, name, loading: false, ...content });
+				} catch (caught) {
+					setPreview({ path, name, loading: false, failed: true, error: caught && typeof caught === "object" && caught.message ? caught.message : String(caught) });
+				}
+			}, []);
+
+			const goUp = useCallback(async () => {
+				if (!cwd) return;
+				try {
+					const parent = await window.__TAURI__.core.invoke("desktop_parent_dir", { path: cwd });
+					if (typeof parent === "string") loadDir(parent);
+				} catch (caught) {
+					setError(caught && typeof caught === "object" && caught.message ? caught.message : String(caught));
+				}
+			}, [cwd, loadDir]);
+
+			if (!open) return null;
+
+			const style = {
+				position: "absolute",
+				top: 0,
+				right: 0,
+				bottom: 0,
+				width: EXPLORER_WIDTH,
+				background: "var(--dsw-alias-bg-layer-1)",
+				borderLeft: "1px solid var(--dsw-alias-border-l2)",
+				boxShadow: "var(--dsw-shadow-lv3)",
+				display: "flex",
+				flexDirection: "column",
+				color: "var(--dsw-alias-label-primary)",
+				fontFamily: "var(--dsw-font-family)"
+			};
+			const headerStyle = {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				padding: "10px 12px 6px",
+				flex: "none"
+			};
+			const tabsStyle = {
+				display: "flex",
+				gap: 4,
+				background: "var(--dsw-alias-interactive-bg-hover)",
+				borderRadius: 8,
+				padding: 2
+			};
+			const tabStyle = (active) => ({
+				flex: 1,
+				border: "none",
+				background: active ? "var(--dsw-alias-bg-layer-1)" : "transparent",
+				color: active ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-tertiary)",
+				borderRadius: 6,
+				padding: "4px 10px",
+				fontSize: 12,
+				fontWeight: 500,
+				cursor: "pointer",
+				fontFamily: "inherit",
+				display: "flex",
+				alignItems: "center",
+				gap: 6,
+				boxShadow: active ? "var(--dsw-shadow-lv1)" : "none"
+			});
+
+			return h("div", { style, "data-dshd-explorer": true },
+				h("div", { style: headerStyle },
+					h("div", { style: tabsStyle },
+						h("button", { type: "button", style: tabStyle(tab === "files"), onClick: () => explorerStore.setTab("files") },
+							h(IconFolderOpenOutline16, {}), "Files"),
+						h("button", { type: "button", style: tabStyle(tab === "preview"), onClick: () => explorerStore.setTab("preview") },
+							h(IconCodeOutline16, {}), "Preview")
+					),
+					h("button", {
+						type: "button",
+						title: "Hide panel",
+						onClick: () => explorerStore.setOpen(false),
+						style: {
+							border: "none",
+							background: "transparent",
+							cursor: "pointer",
+							color: "var(--dsw-alias-label-tertiary)",
+							padding: 4,
+							display: "grid",
+							placeItems: "center",
+							borderRadius: 6
+						}
+					}, h(IconCloseOutline16, {}))
+				),
+
+				tab === "files"
+					? h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
+							h("div", { style: { display: "flex", alignItems: "center", gap: 4, padding: "0 12px 8px", flex: "none" } },
+								h("button", {
+									type: "button",
+									title: "Up",
+									disabled: !cwd || busy,
+									onClick: () => goUp(),
+									style: {
+										border: "none",
+										background: "var(--dsw-alias-interactive-bg-hover)",
+										borderRadius: 6,
+										padding: "4px 6px",
+										cursor: "pointer",
+										color: "var(--dsw-alias-label-secondary)",
+										display: "grid",
+										placeItems: "center",
+										flex: "none"
+									}
+								}, h(IconChevronLeftOutline14, {})),
+								h("button", {
+									type: "button",
+									title: "Refresh",
+									disabled: !cwd || busy,
+									onClick: () => cwd && loadDir(cwd),
+									style: {
+										border: "none",
+										background: "var(--dsw-alias-interactive-bg-hover)",
+										borderRadius: 6,
+										padding: "4px 6px",
+										cursor: "pointer",
+										color: "var(--dsw-alias-label-secondary)",
+										display: "grid",
+										placeItems: "center",
+										flex: "none"
+									}
+								}, h(IconRefreshOutline14, {})),
+								h("div", {
+									title: cwd || "",
+									style: {
+										flex: 1,
+										minWidth: 0,
+										fontSize: 12,
+										color: "var(--dsw-alias-label-tertiary)",
+										whiteSpace: "nowrap",
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										fontFamily: "var(--ds-font-family-code, monospace)"
+									}
+								}, cwd || "…")
+							),
+							error
+								? h("div", { style: { padding: "0 12px 8px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, error)
+								: null,
+							!entries
+								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } },
+										busy ? "Loading…" : (error ? "Nothing to show" : "No workspace yet — pick a folder in Settings → dsh-desktop."))
+								: h("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 6px 12px" } },
+										entries.map((entry) =>
+											h("button", {
+												key: entry.path,
+												type: "button",
+												title: entry.path,
+												onClick: () => (entry.is_dir ? loadDir(entry.path) : openFile(entry.path, entry.name)),
+												style: {
+													display: "flex",
+													alignItems: "center",
+													gap: 8,
+													width: "100%",
+													border: "none",
+													background: "transparent",
+													borderRadius: 6,
+													padding: "5px 8px",
+													cursor: "pointer",
+													font: "inherit",
+													color: "var(--dsw-alias-label-primary)"
+												},
+												onMouseEnter: (event) => {
+													event.currentTarget.style.background = "var(--dsw-alias-interactive-bg-hover)";
+												},
+												onMouseLeave: (event) => {
+													event.currentTarget.style.background = "transparent";
+												}
+											},
+												h("span", { style: { color: entry.is_dir ? "var(--dsw-alias-state-business-primary)" : "var(--dsw-alias-label-secondary)", display: "grid", placeItems: "center", flex: "none" } },
+													entry.is_dir ? h(IconFolderOpen16, {}) : h(IconDataOutline16, {})),
+												h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 } }, entry.name),
+												entry.is_dir
+													? null
+													: h("span", { style: { flex: "none", fontSize: 11, color: "var(--dsw-alias-label-tertiary)", fontVariantNumeric: "tabular-nums" } },
+															formatTime(entry.modified_ms), " ", formatSize(entry.size))
+											)
+										)
+									)
+						)
+					: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
+							preview === null
+								? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: 24, textAlign: "center" } },
+										"Select a file in the Files tab to preview it here.")
+								: h("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } },
+										h("div", { style: { display: "flex", alignItems: "center", gap: 6, padding: "0 12px 8px", flex: "none" } },
+											h("button", {
+												type: "button",
+												title: "Back to files",
+												onClick: () => explorerStore.setTab("files"),
+												style: {
+													border: "none",
+													background: "var(--dsw-alias-interactive-bg-hover)",
+													borderRadius: 6,
+													padding: "4px 6px",
+													cursor: "pointer",
+													color: "var(--dsw-alias-label-secondary)",
+													display: "grid",
+													placeItems: "center",
+													flex: "none"
+												}
+											}, h(IconChevronLeftOutline14, {})),
+											h("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 500 } }, preview.name || "")
+										),
+										preview.loading
+											? h("div", { style: { flex: 1, display: "grid", placeItems: "center", color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, "Loading…")
+											: preview.failed
+												? h("div", { style: { padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary)" } }, preview.error || "Cannot read this file.")
+												: preview.encoding === "base64"
+													? h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", display: "grid", placeItems: "center", padding: 12 } },
+															h("img", { src: `data:${preview.mime || "image/png"};base64,${preview.content}`, alt: preview.name, style: { maxWidth: "100%", maxHeight: "100%", borderRadius: 6 } }))
+													: preview.encoding === "binary"
+														? h("div", { style: { padding: 24, fontSize: 13, color: "var(--dsw-alias-label-tertiary)", textAlign: "center" } },
+																"This is a binary file (no preview).")
+														: h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
+																h("pre", {
+																	style: {
+																		margin: 0,
+																		fontFamily: "var(--ds-font-family-code, monospace)",
+																		fontSize: 12,
+																		lineHeight: 1.6,
+																		color: "var(--dsw-alias-label-secondary)",
+																		whiteSpace: "pre-wrap",
+																		wordBreak: "break-word"
+																	}
+																}, preview.content || " "),
+																preview.truncated
+																	? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
+																			`Preview cut at 1 MB — the full file is ${formatSize(preview.size)}.`)
+																	: null)
+									)
+						)
+			);
+		}
+		//#endregion
+
+		//#region dsh-desktop settings tab
 		const CARD = {
 			border: "1px solid var(--dsw-alias-border-l2)",
 			background: "var(--dsw-alias-bg-layer-3)",
@@ -121,10 +709,12 @@ window.__ModuleLoader__.load({
 		}
 
 		function DesktopSection({ openWorkspace }) {
-			const tauri = typeof window !== "undefined" && window.__TAURI__ !== void 0 && window.__TAURI__.core !== void 0;
+			const tauri = hasTauri();
 			const [state, setState] = useState(null);
 			const [error, setError] = useState(null);
 			const [busy, setBusy] = useState(false);
+			const [progress, setProgress] = useState(null);
+			const [installInfo, setInstallInfo] = useState(null);
 
 			const refresh = useCallback(async () => {
 				try {
@@ -144,6 +734,13 @@ window.__ModuleLoader__.load({
 					.then((unlisten) => {
 						off = unlisten;
 					})
+					.catch(() => {});
+				window.__TAURI__.event
+					.listen(UPDATE_PROGRESS_EVENT, (event) => setProgress(event.payload))
+					.catch(() => {});
+				window.__TAURI__.core
+					.invoke("desktop_install_info")
+					.then(setInstallInfo)
 					.catch(() => {});
 				return () => {
 					if (off) off();
@@ -167,6 +764,22 @@ window.__ModuleLoader__.load({
 					setState(await window.__TAURI__.core.invoke("desktop_check_updates"));
 				} catch (caught) {
 					setError(errText(caught));
+				} finally {
+					setBusy(false);
+				}
+			}, [busy]);
+
+			const updateNow = useCallback(async () => {
+				if (busy) return;
+				setBusy(true);
+				setError(null);
+				setProgress({ phase: "checking" });
+				try {
+					await window.__TAURI__.core.invoke("desktop_update_now");
+					// The app restarts on success — this line only runs on failure.
+				} catch (caught) {
+					setError(errText(caught));
+					setProgress(null);
 				} finally {
 					setBusy(false);
 				}
@@ -203,7 +816,7 @@ window.__ModuleLoader__.load({
 				return h("div", { style: { ...CARD, borderColor: "var(--dsw-alias-state-warning-primary)" } },
 					h("div", { style: LABEL }, "Desktop client not detected"),
 					h("div", { style: { ...HINT, marginTop: 4 } },
-						"The dsh-desktop settings (tray, notifications, updates, window geometry) belong to the native " +
+						"The dsh-desktop settings (tray, notifications, updates, window geometry, the file manager) belong to the native " +
 						"window. They are available when this harness is opened through the dsh-desktop application — " +
 						"in a browser there is no native client to configure."
 					)
@@ -223,28 +836,46 @@ window.__ModuleLoader__.load({
 					})()
 				: "never";
 
+			const progressPercent = progress && progress.total ? Math.min(100, Math.round(((progress.received || 0) / progress.total) * 100)) : null;
+			const updating = progress !== null && progress.phase !== "restarting";
+
 			return h("div", { style: { width: "100%", maxWidth: 760, color: "var(--dsw-alias-label-primary)", display: "flex", flexDirection: "column" } },
-				// Live error line (invoke failures, check errors).
+				// Live error line (invoke failures, check errors, update errors).
 				error || state.update_check_error
 					? h("div", { style: { ...CARD, borderColor: "var(--dsw-alias-state-error-primary)", color: "var(--dsw-alias-state-error-primary)" } },
 							error || state.update_check_error)
 					: null,
 
-				// Update suggestion banner — the updater only ever suggests.
+				// Update suggestion banner — one-click update, never automatic.
 				update
 					? h("div", { style: { ...CARD, borderColor: "var(--dsw-alias-state-business-primary)" } },
-							h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+							h("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } },
 								h("div", { style: { flex: 1, minWidth: 0 } },
 									h("div", { style: LABEL }, `dsh-desktop ${update.version} is available`),
 									h("div", { style: HINT },
 										update.published_at
-											? `Published ${new Date(update.published_at).toLocaleDateString()}. ` +
-												"Updates are never applied automatically — open the release page and update when ready."
-											: "Updates are never applied automatically — open the release page and update when ready."
+											? `Published ${new Date(update.published_at).toLocaleDateString()}. Updates are never applied automatically — click Update when ready.`
+											: "Updates are never applied automatically — click Update when ready."
 									)
 								),
-								h(Button, { variant: "primary", size: "sm", icon: h(IconDownloadOutline16, {}), onClick: () => run("desktop_open_release") }, "Open release")
-							)
+								h(Button, { variant: "primary", size: "sm", icon: h(IconDownloadOutline16, {}), disabled: busy, onClick: () => updateNow() },
+									updating ? "Updating…" : "Update now"),
+								h(Button, { size: "sm", icon: h(IconGlobeOutline14, {}), disabled: busy, onClick: () => run("desktop_open_release") }, "Open release")
+							),
+							// Progress bar while downloading/applying.
+							updating && progressPercent !== null
+								? h("div", { style: { marginTop: 10 } },
+										h("div", { style: { height: 6, borderRadius: 3, background: "var(--dsw-alias-interactive-bg-hover)", overflow: "hidden" } },
+											h("div", { style: { height: "100%", width: `${progressPercent}%`, background: "var(--dsw-alias-state-business-primary)", transition: "width .2s" } })
+										),
+										h("div", { style: { ...HINT, marginTop: 4 } },
+											progress.phase === "downloading"
+												? `Downloading… ${Math.round((progress.received || 0) / 1048576)} / ${Math.round(progress.total / 1048576)} MB`
+												: progress.phase === "applying" ? "Applying…" : "Checking…")
+									)
+								: progress && progress.phase === "restarting"
+									? h("div", { style: { ...HINT, marginTop: 10 } }, "Update applied — restarting…")
+									: null
 						)
 					: null,
 
@@ -285,6 +916,20 @@ window.__ModuleLoader__.load({
 					})
 				),
 
+				// File manager.
+				h("div", { style: CARD },
+					h("div", { style: H3 }, "File manager & preview"),
+					h(Row, {
+						label: "Show explorer",
+						hint: "The panel on the right browses your workspace and previews files. Toggle it from the title bar (folder icon) or here.",
+						control: h(Button, {
+							size: "sm",
+							icon: h(IconPanelLeftOutline16, {}),
+							onClick: () => explorerStore.toggle()
+						}, explorerStore.open ? "Hide panel" : "Show panel")
+					})
+				),
+
 				// Notifications.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Notifications"),
@@ -305,7 +950,7 @@ window.__ModuleLoader__.load({
 					h("div", { style: H3 }, "Updates"),
 					h(Row, {
 						label: "Check for updates automatically",
-						hint: "Queries GitHub releases periodically. Found updates are suggested, never applied automatically.",
+						hint: "Queries GitHub releases periodically. Off by default — updates are one click whenever you want them, never forced.",
 						control: h(Switch, { checked: settings.auto_update_check, onChange: (value) => setSetting("auto_update_check", value) })
 					}),
 					h(Row, {
@@ -328,7 +973,16 @@ window.__ModuleLoader__.load({
 						hint: "Open the GitHub releases page in your browser.",
 						control: h(Button, { size: "sm", icon: h(IconGlobeOutline14, {}), onClick: () => run("desktop_open_release") }, "Open releases page")
 					})
-				)
+				),
+
+				// Installation (the plugin installer story).
+				installInfo
+					? h("div", { style: CARD },
+							h("div", { style: H3 }, "Installation"),
+							h(Row, { label: "Profile", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.profile) }),
+							h(Row, { label: "Client", control: h("span", { style: { ...VALUE, fontSize: 12, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, installInfo.client) })
+						)
+					: null
 			);
 		}
 
@@ -342,11 +996,15 @@ window.__ModuleLoader__.load({
 
 		/** Register the section once the settings surface declares its section slot. */
 		function apply(ctx) {
+			explorerStore.init();
+			// Custom window title bar (native only).
+			if (hasTauri() && typeof document !== "undefined") installTitlebar();
+
 			// Native folder integration: dropping a directory onto the window
 			// opens it as a workspace. Files are left to the webview, which
 			// handles attachments. The tauri core emits this event to the
 			// webview on every drop; directory-ness is checked natively.
-			if (typeof window !== "undefined" && window.__TAURI__ !== void 0 && window.__TAURI__.core !== void 0) {
+			if (hasTauri()) {
 				window.__TAURI__.event
 					.listen("tauri://drag-drop", (event) => {
 						const payload = event.payload;
@@ -371,6 +1029,18 @@ window.__ModuleLoader__.load({
 				locale: NS,
 				inject: () => ({ openWorkspace: (path) => openWorkspace(ctx, path) })
 			}, DesktopSection));
+			// The explorer panel: docked right, Files/Preview tabs. Registered
+			// into the shell overlay (the app's full-frame overlay layer) once
+			// the layout plugin declares it.
+			if (hasTauri()) {
+				ctx.slots.inject("shell.overlay", () => ctx.slots.register({
+					name: "shell.overlay",
+					id: "desktop-explorer",
+					order: 90,
+					locale: NS,
+					inject: () => ({ workspaces: ctx.workspaces })
+				}, ExplorerPanel));
+			}
 		}
 		//#endregion
 		exports.apply = apply;
