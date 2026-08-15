@@ -11,7 +11,6 @@ fn main() {
 				"desktop_open_release",
 				"desktop_reset_geometry",
 				"desktop_test_notification",
-				"desktop_pick_directory",
 				"desktop_is_directory",
 				"desktop_list_dir",
 				"desktop_parent_dir",
@@ -25,6 +24,8 @@ fn main() {
 				"desktop_move",
 				"desktop_open_path",
 				"desktop_search_names",
+				"desktop_update_now",
+				"desktop_install_info",
 			]),
 		),
 	)
