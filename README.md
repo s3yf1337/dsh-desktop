@@ -67,7 +67,16 @@ dsh-desktop tab drives it directly through the `desktop_*` commands.
   browser (no native client) the tab shows a notice instead of dead controls.
 
 
-## Install (one command)
+## Install
+
+### Release packages (CI-built)
+
+Every `v*` tag builds installers on all three platforms via GitHub Actions and
+publishes them as a release: `.deb` / `.AppImage` (Linux), `.dmg` (macOS),
+`.msi` / `.exe` (Windows). The client binary from a release can be dropped in
+with `./install.sh --no-build`, or the bundle used as-is.
+
+### From source (one command)
 
 Requires a working `dsh` CLI (DeepSeek Harness) and, for the first build, a
 Rust toolchain (`cargo`) — or grab a release binary and pass `--no-build`.
@@ -86,7 +95,8 @@ What it does:
    linked into its `node_modules`);
 2. builds the native render client (`cargo build --release`) if missing;
 3. installs `dsh-desktop-shell` + the `dsh-desktop` launcher to
-   `~/.local/bin` and registers a desktop menu entry.
+   `~/.local/bin`, installs the application icon into the hicolor theme, and
+   registers a desktop menu entry.
 
 Then launch from your application menu ("DeepSeek Harness"), run
 `dsh-desktop`, or boot the profile directly:
