@@ -50,7 +50,12 @@ fn build_menu(app: &AppHandle, update: Option<&UpdateInfo>) -> tauri::Result<Men
 /// Create the tray icon and wire its menu handlers.
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 	let menu = build_menu(app, None)?;
-	let icon = app.default_window_icon().cloned().unwrap();
+	// The window icon may be absent (e.g. no icon bundled); falling back to a
+	// 1x1 transparent placeholder keeps the tray working instead of panicking.
+	let icon = app
+		.default_window_icon()
+		.cloned()
+		.unwrap_or_else(|| tauri::image::Image::new_owned(vec![0, 0, 0, 0], 1, 1));
 	TrayIconBuilder::with_id("main")
 		.icon(icon)
 		.tooltip("DeepSeek Harness")
