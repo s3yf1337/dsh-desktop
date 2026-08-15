@@ -832,6 +832,7 @@ dependencies = [
  "glib",
  "open",
  "reqwest",
+ "ring",
  "rustls",
  "semver",
  "serde",
