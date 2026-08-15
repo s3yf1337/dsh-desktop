@@ -46,7 +46,8 @@ window.__ModuleLoader__.load({
 			IconSendOutline14,
 			IconFolderClose16,
 			IconGlobeOutline16,
-			MarkdownText
+			MarkdownText,
+			CodeBlock
 		} = _deepseek_ai_dsh_client_ui_primitives;
 
 		const NS = "desktopShell";
@@ -1170,6 +1171,480 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			}
 		}
 
+		// ── preview enhancements: source highlighting, mermaid, CSV ─────────
+		/** Map a source-file extension (or the filename, case-insensitive) to a
+		* shiki language alias the primitives' highlighter accepts, else null.
+		* `dockerfile` is intentionally absent — it is not a shiki alias. */
+		const LANG_ALIASES = {
+			js: "jsx", mjs: "jsx", cjs: "jsx", jsx: "jsx",
+			ts: "tsx", mts: "tsx", cts: "tsx", tsx: "tsx",
+			sh: "bash", bash: "bash", zsh: "bash",
+			json: "json", jsonc: "json",
+			py: "python", rb: "ruby", go: "go", rs: "rust",
+			java: "java", c: "c", h: "c",
+			cpp: "cpp", cc: "cpp", hpp: "cpp", hh: "cpp",
+			cs: "csharp", kt: "kotlin", kts: "kotlin", swift: "swift",
+			php: "php", yaml: "yaml", yml: "yaml", toml: "toml",
+			ini: "ini", cfg: "ini", conf: "ini",
+			md: "markdown", markdown: "markdown", mdx: "mdx",
+			html: "html", htm: "html", css: "css", scss: "scss", less: "less",
+			sql: "sql", xml: "xml", plist: "xml", lua: "lua"
+		};
+		function langFromPath(name) {
+			const match = /\.([a-z0-9]+)$/i.exec(String(name || ""));
+			if (!match) return null;
+			return LANG_ALIASES[match[1].toLowerCase()] || null;
+		}
+
+		function isMermaidName(name) {
+			return /\.(mmd|mermaid)$/i.test(name || "");
+		}
+
+		function isCsvName(name) {
+			return /\.(csv|tsv)$/i.test(name || "");
+		}
+
+		/** Split markdown source into segments, pulling any ```/~~~ fence whose
+		* info string starts with the word `mermaid` out into a "mermaid"
+		* segment. Everything else stays "markdown". An unclosed mermaid fence
+		* at EOF is folded back into markdown so nothing is ever lost. */
+		function splitMermaidFences(source) {
+			const lines = String(source).split("\n");
+			const segments = [];
+			let markdown = [];
+			let fence = null;
+			let code = [];
+			const flushMarkdown = () => {
+				if (markdown.length > 0) {
+					segments.push({ kind: "markdown", text: markdown.join("\n") });
+					markdown = [];
+				}
+			};
+			for (const line of lines) {
+				const trimmed = line.trim();
+				if (fence === null) {
+					const open = /^(`{3,}|~{3,})[ \t]*(.*)$/.exec(trimmed);
+					if (open) {
+						const firstWord = (open[2] || "").trim().split(/\s+/, 1)[0].toLowerCase();
+						if (firstWord === "mermaid") {
+							flushMarkdown();
+							fence = { marker: open[1][0], count: open[1].length };
+							code = [];
+							continue;
+						}
+					}
+					markdown.push(line);
+				} else {
+					const close = new RegExp(`^\\${fence.marker}{${fence.count},}[ \\t]*$`).test(trimmed);
+					if (close) {
+						segments.push({ kind: "mermaid", code: code.join("\n") });
+						fence = null;
+						code = [];
+					} else {
+						code.push(line);
+					}
+				}
+			}
+			flushMarkdown();
+			if (fence !== null) segments.push({ kind: "markdown", text: code.join("\n") });
+			return segments;
+		}
+
+		/** Minimal RFC-4180-ish CSV/TSV parser: quoted fields may contain the
+		* delimiter and newlines; a doubled quote inside quotes is a literal
+		* quote. When `delimiter` is not "," or "\t" it is auto-detected from
+		* the first line (more tabs than commas → tab). Returns {rows, delimiter}. */
+		function parseCsv(text, delimiter) {
+			const src = String(text).replace(/^\uFEFF/, "");
+			let delim = delimiter;
+			if (delim !== "," && delim !== "\t") {
+				const firstLine = src.split(/\r?\n/, 1)[0] || "";
+				let commas = 0;
+				let tabs = 0;
+				let inQuote = false;
+				for (let i = 0; i < firstLine.length; i++) {
+					const ch = firstLine[i];
+					if (ch === '"') inQuote = !inQuote;
+					else if (!inQuote) {
+						if (ch === ",") commas++;
+						else if (ch === "\t") tabs++;
+					}
+				}
+				delim = tabs > commas ? "\t" : ",";
+			}
+			const rows = [];
+			let row = [];
+			let field = "";
+			let inQ = false;
+			const pushField = () => {
+				row.push(field);
+				field = "";
+			};
+			const pushRow = () => {
+				pushField();
+				rows.push(row);
+				row = [];
+			};
+			for (let i = 0; i < src.length; i++) {
+				const ch = src[i];
+				if (inQ) {
+					if (ch === '"') {
+						if (src[i + 1] === '"') {
+							field += '"';
+							i++;
+						} else {
+							inQ = false;
+						}
+					} else {
+						field += ch;
+					}
+				} else if (ch === '"') {
+					inQ = true;
+				} else if (ch === delim) {
+					pushField();
+				} else if (ch === "\n" || ch === "\r") {
+					if (ch === "\r" && src[i + 1] === "\n") i++;
+					pushRow();
+				} else {
+					field += ch;
+				}
+			}
+			if (field !== "" || row.length > 0) pushRow();
+			// A trailing newline leaves an empty last row — drop it.
+			if (rows.length > 1) {
+				const last = rows[rows.length - 1];
+				if (last.length === 1 && last[0] === "") rows.pop();
+			}
+			return { rows, delimiter: delim };
+		}
+
+		/** Indices of columns (0-based) whose every non-header cell parses as a
+		* finite number (empty cells disqualify the column). */
+		function csvNumericColumns(rows) {
+			const cols = [];
+			if (!rows || rows.length < 2) return cols;
+			const width = rows[0].length;
+			for (let c = 0; c < width; c++) {
+				let numeric = true;
+				for (let r = 1; r < rows.length; r++) {
+					const value = rows[r][c];
+					if (typeof value !== "string" || value.trim() === "" || !Number.isFinite(Number(value.trim()))) {
+						numeric = false;
+						break;
+					}
+				}
+				if (numeric) cols.push(c);
+			}
+			return cols;
+		}
+
+		/** Fast stable string hash (djb2) for diagram source — keeps rendered
+		* diagrams keyed by content so a half-streamed fence does not flicker. */
+		function hashString(value) {
+			let hash = 5381;
+			const s = String(value);
+			for (let i = 0; i < s.length; i++) {
+				hash = ((hash << 5) + hash + s.charCodeAt(i)) | 0;
+			}
+			return (hash >>> 0).toString(36);
+		}
+
+		// ── mermaid runtime (module-level singleton) ────────────────────────
+		let mermaidIdCounter = 0;
+		let mermaidInitialized = false;
+		let mermaidScriptPromise = null;
+		const mermaidSvgCache = new Map();
+		const MERMAID_CACHE_LIMIT = 50;
+
+		/** Inject the vendored mermaid script once; resolves on load, rejects on
+		* failure (offline / missing asset). */
+		function loadMermaid() {
+			if (mermaidScriptPromise) return mermaidScriptPromise;
+			mermaidScriptPromise = new Promise((resolve, reject) => {
+				if (typeof document === "undefined") {
+					mermaidScriptPromise = null;
+					reject(new Error("No DOM to inject mermaid into."));
+					return;
+				}
+				if (document.querySelector('script[data-dshd-mermaid]')) {
+					resolve();
+					return;
+				}
+				const script = document.createElement("script");
+				script.setAttribute("data-dshd-mermaid", "1");
+				script.src = `${location.origin}/dshd-asset/mermaid.min.js`;
+				script.onload = () => resolve();
+				script.onerror = () => {
+					mermaidScriptPromise = null; // allow a later retry
+					reject(new Error("Mermaid script failed to load (offline or missing asset)."));
+				};
+				document.head.appendChild(script);
+			});
+			return mermaidScriptPromise;
+		}
+
+		/** Render `code` to an SVG string via mermaid. Caches by source hash to
+		* avoid re-render flicker when the SPA re-inserts a diagram. */
+		async function renderMermaid(code) {
+			const source = String(code || "").trim();
+			if (source === "") throw new Error("Empty diagram.");
+			const hash = hashString(source);
+			const cached = mermaidSvgCache.get(hash);
+			if (cached) return cached;
+			await loadMermaid();
+			if (typeof window.mermaid === "undefined" || typeof window.mermaid.initialize !== "function") {
+				throw new Error("Mermaid failed to load (offline or missing asset).");
+			}
+			if (!mermaidInitialized) {
+				try {
+					window.mermaid.initialize({
+						startOnLoad: false,
+						theme: "dark",
+						securityLevel: "strict",
+						fontFamily: "var(--dsw-font-family, sans-serif)"
+					});
+				} catch (caught) {
+					throw new Error(`Mermaid initialize failed: ${errText(caught)}`);
+				}
+				mermaidInitialized = true;
+			}
+			let svg;
+			try {
+				const result = await window.mermaid.render(`mermaid-${mermaidIdCounter++}`, source);
+				svg = result && result.svg;
+			} catch (caught) {
+				throw new Error(`Mermaid render failed: ${errText(caught)}`);
+			}
+			if (typeof svg !== "string" || svg === "") throw new Error("Mermaid returned an empty diagram.");
+			mermaidSvgCache.set(hash, svg);
+			if (mermaidSvgCache.size > MERMAID_CACHE_LIMIT) {
+				const firstKey = mermaidSvgCache.keys().next().value;
+				if (firstKey !== void 0) mermaidSvgCache.delete(firstKey);
+			}
+			return svg;
+		}
+
+		/** Small component: renders a mermaid SVG with a loading placeholder, or
+		* the raw source with an error caption when rendering fails. */
+		function MermaidFence({ code }) {
+			const [state, setState] = useState({ status: "loading", svg: null, error: null });
+			useEffect(() => {
+				let cancelled = false;
+				setState({ status: "loading", svg: null, error: null });
+				renderMermaid(code)
+					.then((svg) => {
+						if (!cancelled) setState({ status: "done", svg, error: null });
+					})
+					.catch((caught) => {
+						if (!cancelled) setState({ status: "error", svg: null, error: errText(caught) });
+					});
+				return () => {
+					cancelled = true;
+				};
+			}, [code]);
+			if (state.status === "loading") {
+				return h("div", {
+					style: {
+						display: "grid",
+						placeItems: "center",
+						minHeight: 80,
+						padding: 16,
+						margin: "8px 0",
+						fontSize: 13,
+						color: "var(--dsw-alias-label-tertiary)",
+						border: "1px dashed var(--dsw-alias-border-l2)",
+						borderRadius: 8,
+						background: "var(--dsw-alias-bg-layer-1)"
+					}
+				}, "Rendering diagram…");
+			}
+			if (state.status === "error") {
+				return h("div", { style: { margin: "8px 0" } },
+					h("div", { style: { fontSize: 11, color: "var(--dsw-alias-state-error-primary)", marginBottom: 4 } },
+						state.error || "Diagram could not be rendered."),
+					h("pre", {
+						style: {
+							margin: 0,
+							overflow: "auto",
+							fontFamily: "var(--ds-font-family-code, monospace)",
+							fontSize: 11,
+							lineHeight: 1.5,
+							color: "var(--dsw-alias-label-secondary)",
+							whiteSpace: "pre-wrap",
+							wordBreak: "break-word",
+							border: "1px solid var(--dsw-alias-border-l2)",
+							borderRadius: 6,
+							padding: 8,
+							background: "var(--dsw-alias-bg-layer-1)"
+						}
+					}, code));
+			}
+			return h("div", { style: { overflowX: "auto", margin: "8px 0" }, dangerouslySetInnerHTML: { __html: state.svg } });
+		}
+
+		/** Inline SVG chart of one or more numeric CSV columns: x = row index,
+		* y = numeric value. Every numeric column becomes a separate series
+		* (distinct stroke colors + legend). */
+		const SERIES_COLORS = ["#4f6ef7", "#e8a13a", "#2ecc71", "#e05561"];
+		function CsvChart({ rows, numericCols, kind }) {
+			const W = 720;
+			const H = 260;
+			const padL = 8;
+			const padR = 88;
+			const padT = 30;
+			const padB = 12;
+			const header = rows[0] || [];
+			const cap = 2000;
+			const dataRows = rows.slice(1, cap + 1);
+			if (dataRows.length === 0 || numericCols.length === 0) {
+				return h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)", padding: "12px 0" } },
+					"No numeric columns to chart.");
+			}
+			if (header.length > 12) {
+				return h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)", padding: "12px 0" } },
+					"Too many columns to chart.");
+			}
+			let minY = Infinity;
+			let maxY = -Infinity;
+			for (const col of numericCols) {
+				for (const row of dataRows) {
+					const v = Number(row[col]);
+					if (Number.isFinite(v)) {
+						if (v < minY) minY = v;
+						if (v > maxY) maxY = v;
+					}
+				}
+			}
+			if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+				minY = 0;
+				maxY = 1;
+			}
+			if (minY === maxY) {
+				minY -= 1;
+				maxY += 1;
+			}
+			const range = maxY - minY;
+			const plotW = W - padL - padR;
+			const plotH = H - padT - padB;
+			const xAt = (index) => padL + (dataRows.length <= 1 ? 0 : (index / Math.max(dataRows.length - 1, 1)) * plotW);
+			const yAt = (value) => padT + (1 - (value - minY) / range) * plotH;
+
+			const gridlines = [];
+			for (let g = 0; g <= 3; g++) {
+				const value = minY + (range * g) / 3;
+				const y = yAt(value);
+				gridlines.push(h("line", {
+					key: `g${g}`,
+					x1: padL,
+					x2: W - padR,
+					y1: y,
+					y2: y,
+					stroke: "var(--dsw-alias-border-l1, rgba(128,128,128,.35))",
+					strokeWidth: 1
+				}));
+			}
+
+			const series = numericCols.map((col, si) => {
+				const color = SERIES_COLORS[si % SERIES_COLORS.length];
+				const title = header[col] || `Col ${col + 1}`;
+				const points = [];
+				const bars = [];
+				for (let i = 0; i < dataRows.length; i++) {
+					const v = Number(dataRows[i][col]);
+					if (!Number.isFinite(v)) continue;
+					const x = xAt(i);
+					const y = yAt(v);
+					points.push([x, y]);
+					if (kind === "bar") {
+						const barW = Math.max((plotW / dataRows.length) / Math.max(numericCols.length, 1) - 1, 1);
+						bars.push(h("rect", {
+							key: `b${si}_${i}`,
+							x: x - barW / 2,
+							y,
+							width: barW,
+							height: Math.max(padT + plotH - y, 0),
+							fill: color,
+							opacity: 0.55
+						}));
+					}
+				}
+				const polyline = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+				return { color, title, polyline, bars };
+			});
+
+			const shapes = [];
+			for (const s of series) {
+				if (kind === "bar") shapes.push(s.bars);
+				else if (s.polyline !== "") {
+					shapes.push(h("polyline", { key: s.title + "-line", points: s.polyline, fill: "none", stroke: s.color, strokeWidth: 1.5, strokeLinejoin: "round", strokeLinecap: "round" }));
+				}
+			}
+
+			return h("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", style: { maxHeight: 320, display: "block" } },
+				gridlines,
+				shapes,
+				series.map((s, i) =>
+					h("text", { key: s.title + "-lbl", x: W - padR + 6, y: padT + i * 16, fontSize: 11, fill: s.color },
+						`■ ${s.title}`)));
+		}
+
+		/** CSV/TSV preview: a Table / Line / Bar switcher over the parsed rows. */
+		function CsvView({ text }) {
+			const [view, setView] = useState("table");
+			const parsed = useMemo(() => {
+				try {
+					return parseCsv(text);
+				} catch {
+					return { rows: [], delimiter: "," };
+				}
+			}, [text]);
+			const rows = parsed.rows;
+			const numericCols = useMemo(() => csvNumericColumns(rows), [rows]);
+			if (!rows || rows.length === 0) {
+				return h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)", padding: "12px 0" } }, "Empty file.");
+			}
+			const cap = 2000;
+			const dataRows = rows.slice(1, cap + 1);
+			const truncated = rows.length - 1 > cap;
+			const header = rows[0] || [];
+			const btn = (name) => ({
+				border: "1px solid var(--dsw-alias-border-l2)",
+				background: view === name ? "var(--dsw-alias-interactive-bg-hover)" : "transparent",
+				color: view === name ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-secondary)",
+				borderRadius: 999,
+				padding: "3px 10px",
+				fontSize: 11,
+				cursor: "pointer",
+				fontFamily: "inherit"
+			});
+			let content;
+			if (view === "table") {
+				content = h("table", {
+					style: {
+						borderCollapse: "collapse",
+						background: "var(--dsw-alias-bg-layer-1)",
+						color: "var(--dsw-alias-label-secondary)"
+					}
+				},
+					h("thead", null, h("tr", null, header.map((cell, i) =>
+						h("th", { key: i, style: { padding: "4px 10px", border: "1px solid var(--dsw-alias-border-l2)", fontSize: 12, fontWeight: 600, textAlign: "left", position: "sticky", top: 0, background: "var(--dsw-alias-bg-hover)", color: "var(--dsw-alias-label-primary)", whiteSpace: "nowrap" } }, cell)))),
+					h("tbody", null, dataRows.map((row, ri) =>
+						h("tr", { key: ri }, header.map((_, ci) =>
+							h("td", { key: ci, style: { padding: "4px 10px", border: "1px solid var(--dsw-alias-border-l2)", fontSize: 12, whiteSpace: "nowrap" } }, row[ci] ?? ""))))));
+			} else {
+				content = h(CsvChart, { rows, numericCols, kind: view });
+			}
+			return h("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+				h("div", { style: { display: "flex", gap: 6, flex: "none", paddingTop: 8 } },
+					h("button", { type: "button", onClick: () => setView("table"), style: btn("table") }, "Table"),
+					h("button", { type: "button", onClick: () => setView("line"), style: btn("line") }, "Line"),
+					h("button", { type: "button", onClick: () => setView("bar"), style: btn("bar") }, "Bar")),
+				content,
+				truncated
+					? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)" } }, "Showing first 2000 rows / points.")
+					: null);
+		}
+
 		/** The right-hand explorer panel: docked right, Files/Preview tabs, a
 		* context-menu-driven file manager over the native fs commands, and a
 		* "pick a folder" mode that serves as the harness's workspace picker.
@@ -1308,8 +1783,23 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				handle.addEventListener("pointercancel", onUp);
 			};
 
+			// The workspace/session snapshots must stay LIVE: the store starts
+			// pending (empty) and fills over RPC, so the panel subscribes and
+			// re-reads on every change instead of freezing the first read.
+			const [storeRev, setStoreRev] = useState(0);
+			useEffect(() => {
+				if (!workspaces || typeof workspaces.list?.subscribe !== "function") return;
+				return workspaces.list.subscribe(() => setStoreRev((rev) => rev + 1));
+			}, [workspaces]);
+			useEffect(() => {
+				if (!sessions || typeof sessions.list?.subscribe !== "function") return;
+				return sessions.list.subscribe(() => setStoreRev((rev) => rev + 1));
+			}, [sessions]);
+
 			// Initial root: the remembered directory, else the current
-			// workspace directory, else home.
+			// workspace directory, else home. Depends on storeRev: the
+			// workspace store starts pending (empty) and fills over RPC, so
+			// the first render must not freeze the root on the home fallback.
 			const root = useMemo(() => {
 				if (workspaces && typeof workspaces.list === "object" && workspaces.list !== null) {
 					try {
@@ -1323,20 +1813,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					}
 				}
 				return null;
-			}, [workspaces]);
-
-			// The workspace/session snapshots must stay LIVE: the store starts
-			// pending (empty) and fills over RPC, so the panel subscribes and
-			// re-reads on every change instead of freezing the first read.
-			const [storeRev, setStoreRev] = useState(0);
-			useEffect(() => {
-				if (!workspaces || typeof workspaces.list?.subscribe !== "function") return;
-				return workspaces.list.subscribe(() => setStoreRev((rev) => rev + 1));
-			}, [workspaces]);
-			useEffect(() => {
-				if (!sessions || typeof sessions.list?.subscribe !== "function") return;
-				return sessions.list.subscribe(() => setStoreRev((rev) => rev + 1));
-			}, [sessions]);
+			}, [workspaces, storeRev]);
 
 			const workspaceSnapshot = useMemo(() => {
 				if (!workspaces || typeof workspaces.list?.getSnapshot !== "function") return null;
@@ -1562,6 +2039,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					previewStatRef.current = { size: content.size, modified_ms: content.modified_ms };
 					if (content.encoding === "base64") {
 						setPreview({ kind: "file", path, name, mode: "image", loading: false, ...content });
+					} else if (content.encoding === "utf8" && isMermaidName(name)) {
+						// Mermaid diagram source renders as live SVG.
+						setPreview({ kind: "file", path, name, mode: "mermaid", source: content.content, loading: false, ...content });
+					} else if (content.encoding === "utf8" && isCsvName(name)) {
+						// CSV/TSV renders as a table with optional charts.
+						setPreview({ kind: "file", path, name, mode: "csv", source: content.content, loading: false, ...content });
 					} else if (content.encoding === "utf8" && isMarkdownName(name)) {
 						// Markdown renders with the app's own renderer (the
 						// conversation UI's), with relative images rewritten to
@@ -2572,6 +3055,16 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 							[formatSize(current.size), imgDims ? ` · ${imgDims.width}×${imgDims.height}` : "", " · click to zoom"].join("")));
 				}
 				if (current.mode === "markdown") {
+					// When the source carries a mermaid fence, render segments in
+					// order (markdown blocks via the app renderer, mermaid fences
+					// as live SVG). Ordinary markdown with no mermaid fence keeps
+					// the exact single-MarkdownText path below.
+					const mdBody = /\`\`\`\s*mermaid|~~~\s*mermaid/.test(current.source)
+						? splitMermaidFences(current.source).map((segment, index) =>
+								segment.kind === "mermaid"
+									? h(MermaidFence, { key: index, code: segment.code })
+									: h(MarkdownText, { key: index, text: segment.text, codeLabels: { copyLabel: "Copy", copiedLabel: "Copied" } }))
+						: h(MarkdownText, { text: current.source, codeLabels: { copyLabel: "Copy", copiedLabel: "Copied" } });
 					return h("div", { ref: mdRef, className: "dshd-scroll", style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" } },
 						current.toc && current.toc.length > 1
 							? h("details", { style: { margin: "4px 0 12px", fontSize: 12, color: "var(--dsw-alias-label-secondary)" } },
@@ -2581,11 +3074,19 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 										current.toc.map((item, index) =>
 											h("button", { key: index, type: "button", title: item.text, onClick: () => scrollToc(item), style: tocItemStyle(item.level) }, item.text))))
 							: null,
-						h(MarkdownText, { text: current.source, codeLabels: { copyLabel: "Copy", copiedLabel: "Copied" } }),
+						mdBody,
 						current.truncated
 							? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
 									`Preview cut at 1 MB — the full file is ${formatSize(current.size)}.`)
 							: null);
+				}
+				if (current.mode === "mermaid") {
+					return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
+						h(MermaidFence, { code: current.source }));
+				}
+				if (current.mode === "csv") {
+					return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
+						h(CsvView, { text: current.source }));
 				}
 				if (current.mode === "hexdump") {
 					return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
@@ -2608,19 +3109,26 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					return h("div", { style: { padding: 24, fontSize: 13, color: "var(--dsw-alias-label-tertiary)", textAlign: "center" } },
 						"This is a binary file (no preview).");
 				}
-				// Plain text.
+				// Plain text / source. Known source extensions render through the
+				// primitives' CodeBlock (syntax highlighting + copy button) inside
+				// a scrollable wrapper; everything else keeps the raw pre.
+				const sourceLang = langFromPath(current.name);
+				const sourceContent = current.content || "";
 				return h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", padding: "0 12px 12px" } },
-					h("pre", {
-						style: {
-							margin: 0,
-							fontFamily: "var(--ds-font-family-code, monospace)",
-							fontSize: 12,
-							lineHeight: 1.6,
-							color: "var(--dsw-alias-label-secondary)",
-							whiteSpace: "pre-wrap",
-							wordBreak: "break-word"
-						}
-					}, current.content || " "),
+					sourceLang !== null && sourceContent.length <= 512 * 1024
+						? h("div", { style: { flex: 1, minHeight: 0, overflow: "auto", minWidth: 0 } },
+								h(CodeBlock, { code: sourceContent, lang: sourceLang, copyLabel: "Copy", copiedLabel: "Copied" }))
+						: h("pre", {
+								style: {
+									margin: 0,
+									fontFamily: "var(--ds-font-family-code, monospace)",
+									fontSize: 12,
+									lineHeight: 1.6,
+									color: "var(--dsw-alias-label-secondary)",
+									whiteSpace: "pre-wrap",
+									wordBreak: "break-word"
+								}
+							}, sourceContent || " "),
 					current.truncated
 						? h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)", padding: "4px 0 8px" } },
 								`Preview cut at 1 MB — the full file is ${formatSize(current.size)}.`)
@@ -3421,6 +3929,197 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			return null;
 		}
 
+		// ── mermaid + CSV in chat answers ──────────────────────────────────
+		// Non-invasive DOM augmentation: a debounced MutationObserver renders a
+		// mermaid fence and a CSV fence from live assistant answers into an SVG
+		// / table placed as a SIBLING of the `<pre>` (via insertAdjacentElement
+		// "beforebegin"), never touching the React-managed nodes themselves.
+		// SAFETY: we never remove or restructure React-managed nodes; the only
+		// node we ever mutate is the injected `<div data-dshd-diagram>` (ours)
+		// and the `style.display` on the `<pre>` (only on success). React
+		// reconciliation may drop our injected sibling on a re-render, which the
+		// per-node hash check turns into a clean re-insert, never a duplicate.
+		let answerDiagramsInstalled = false;
+		function installAnswerDiagrams() {
+			if (!hasTauri() || typeof document === "undefined") return;
+			if (answerDiagramsInstalled) return;
+			answerDiagramsInstalled = true;
+
+			const schedule = (() => {
+				let timer = null;
+				return (fn) => {
+					if (timer !== null) clearTimeout(timer);
+					timer = setTimeout(() => {
+						timer = null;
+						fn();
+					}, 800);
+				};
+			})();
+
+			const escapeHtml = (value) =>
+				String(value).replace(/[&<>"']/g, (ch) => ({
+					"&": "&amp;",
+					"<": "&lt;",
+					">": "&gt;",
+					'"': "&quot;",
+					"'": "&#39;"
+				}[ch]));
+
+			/** Build the inner HTML for a CSV `<pre>`, token-styled, capped. */
+			function csvInnerHtml(text) {
+				let rows;
+				try {
+					rows = parseCsv(text).rows;
+				} catch {
+					return null;
+				}
+				if (!rows || rows.length === 0) return "<div></div>";
+				const cap = 2000;
+				const header = rows[0] || [];
+				const data = rows.slice(1, cap + 1);
+				const truncated = rows.length - 1 > cap;
+				const th = "padding:4px 10px;border:1px solid var(--dsw-alias-border-l2);font-size:12px;font-weight:600;text-align:left;background:var(--dsw-alias-bg-hover);color:var(--dsw-alias-label-primary);white-space:nowrap";
+				const td = "padding:4px 10px;border:1px solid var(--dsw-alias-border-l2);font-size:12px;white-space:nowrap";
+				let html = '<div style="max-height:320px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;margin:4px 0">';
+				html += '<table style="border-collapse:collapse;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary)">';
+				html += "<thead><tr>";
+				for (const cell of header) html += `<th style="${th}">${escapeHtml(cell)}</th>`;
+				html += "</tr></thead><tbody>";
+				for (const row of data) {
+					html += "<tr>";
+					for (let c = 0; c < header.length; c++) html += `<td style="${td}">${escapeHtml(row[c] ?? "")}</td>`;
+					html += "</tr>";
+				}
+				html += "</tbody></table>";
+				if (truncated) html += '<div style="padding:6px 10px;font-size:11px;color:var(--dsw-alias-label-tertiary)">Showing first 2000 rows.</div>';
+				html += "</div>";
+				return html;
+			}
+
+			/** Render one matched `<pre>` up to date with `sourceCode`. */
+			function renderOne(pre, sourceCode, kind) {
+				const hash = hashString(sourceCode);
+				const parent = pre.parentNode;
+				if (!parent) return;
+				// Find our previous injected sibling (if any) for this pre.
+				let diagramEl = null;
+				for (let node = pre.previousSibling; node; node = node.previousSibling) {
+					if (node.nodeType === Node.ELEMENT_NODE && node.hasAttribute && node.hasAttribute("data-dshd-diagram")) {
+						diagramEl = node;
+						break;
+					}
+				}
+				if (diagramEl && diagramEl.getAttribute("data-dshd-hash") === hash) return; // up to date
+				const pending = kind === "mermaid"
+					? renderMermaid(sourceCode)
+					: Promise.resolve(csvInnerHtml(sourceCode));
+				pending
+					.then((html) => {
+						if (html === null || html === undefined) return; // leave pre visible
+						try {
+							if (diagramEl) diagramEl.remove();
+							const el = document.createElement("div");
+							el.setAttribute("data-dshd-diagram", "1");
+							el.setAttribute("data-dshd-hash", hash);
+							el.innerHTML = html;
+							parent.insertBefore(el, pre);
+							pre.style.display = "none";
+						} catch {
+							// leave the pre visible; never corrupt the tree
+						}
+					})
+					.catch(() => {
+						// Render failed: leave the pre visible and drop a stale diagram.
+						try {
+							if (diagramEl) diagramEl.remove();
+						} catch {
+							// ignore
+						}
+					});
+			}
+
+			function scanOne(codeEl, kind) {
+				const pre = codeEl && codeEl.parentElement;
+				if (!pre || pre.tagName !== "PRE") return;
+				const sourceCode = String(codeEl.textContent || "").trim();
+				if (sourceCode === "") return;
+				renderOne(pre, sourceCode, kind);
+			}
+
+			/** First non-empty line of `code` (lowercased). */
+			const firstLine = (code) => {
+				for (const line of String(code).split("\n")) {
+					const trimmed = line.trim();
+					if (trimmed !== "") return trimmed;
+				}
+				return "";
+			};
+
+			/** Content-based fence kind detection. The SPA's CodeBlock renders
+			* UNKNOWN languages (mermaid, csv) through its plain fallback, whose
+			* `<code>` carries NO `language-*` class — class selectors can never
+			* match them. Detect by content instead: mermaid diagrams open with
+			* a distinctive first keyword, CSV/TSV looks tabular. */
+			function fenceKind(code) {
+				const first = firstLine(code);
+				if (first === "") return null;
+				if (
+					/^(graph|flowchart)\s+(TB|TD|BT|RL|LR)\b/i.test(first) ||
+					/^(sequenceDiagram|classDiagram|stateDiagram(-v2)?|erDiagram|gantt|pie|journey|mindmap|timeline|gitGraph|block-beta|quadrant|C4Context|packet|xychart-beta|sankey|zenuml|architecture-beta)\b/i.test(first)
+				) {
+					return "mermaid";
+				}
+				// Tabular: the same delimiter in every non-empty line, no
+				// code-looking first line. Conservative — a prose block with
+				// one comma stays untouched.
+				const lines = String(code).split("\n").map((line) => line.trim()).filter((line) => line !== "");
+				if (lines.length >= 2) {
+					const firstCount = countDelims(lines[0]);
+					if (firstCount > 0 && lines.every((line) => countDelims(line) === firstCount)) {
+						if (!/^(import |from |def |class |const |let |var |function |SELECT |INSERT |UPDATE |#|<!--|\/\/|\/\*|\{|})/i.test(lines[0])) {
+							return "csv";
+						}
+					}
+				}
+				return null;
+			}
+			const countDelims = (line) => {
+				const commas = (line.match(/,/g) || []).length;
+				const tabs = (line.match(/\t/g) || []).length;
+				const semis = (line.match(/;/g) || []).length;
+				const total = commas + tabs + semis;
+				// Mixed delimiters are not tabular.
+				if ((commas > 0) + (tabs > 0) + (semis > 0) > 1) return -1;
+				return total;
+			};
+
+			/** One pass over the conversation container: every code block is
+			* classified by content and rendered when it looks like a fence. */
+			function scan() {
+				try {
+					const scope = document.querySelector("[data-conversation-scroll]");
+					if (!scope) return;
+					for (const code of scope.querySelectorAll("pre code")) {
+						const kind = fenceKind(String(code.textContent || ""));
+						if (kind !== null) scanOne(code, kind);
+					}
+				} catch {
+					// the observer callback must never throw
+				}
+			}
+
+			try {
+				const observer = new MutationObserver(() => schedule(scan));
+				// characterData matters: the final chunk of a streamed fence often
+				// lands as an in-place text update, not a childList change — a
+				// scan that only fires on childList would leave the last partial
+				// render (or none) on screen.
+				observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+			} catch {
+				// observer unavailable (very old webview) — degrade silently
+			}
+		}
+
 		/** Register the section once the settings surface declares its section slot. */
 		function apply(ctx) {
 			explorerStore.init();
@@ -3440,6 +4139,8 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			if (hasTauri() && typeof document !== "undefined") installExternalLinks();
 			// Ctrl/Cmd+F quick search over the visible chat (native only).
 			if (hasTauri() && typeof document !== "undefined") installChatSearch();
+			// Mermaid + CSV rendered inside live chat answers (native only).
+			if (hasTauri() && typeof document !== "undefined") installAnswerDiagrams();
 
 			// Native file/folder integration: dropping a directory onto the
 			// window opens it as a workspace; dropping image files attaches
@@ -3552,7 +4253,11 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			extractToc,
 			resolveLocalPath,
 			normalizeWebUrl,
-			dshdFileUrl
+			dshdFileUrl,
+			langFromPath,
+			splitMermaidFences,
+			parseCsv,
+			csvNumericColumns
 		};
 		exports.desktopSettingsView = DesktopSettingsView;
 		return module.exports;

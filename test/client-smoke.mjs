@@ -53,6 +53,8 @@ primitivesStub.writeClipboard = async () => true;
 // The app's markdown renderer: a stub that just echoes the text, so the
 // preview panel renders in the smoke test without the real primitives.
 primitivesStub.MarkdownText = ({ text }) => h("div", { "data-markdown": true }, text);
+// Stub of the primitives' CodeBlock (syntax-highlighted source preview).
+primitivesStub.CodeBlock = ({ code }) => h("pre", { "data-codeblock": true }, code);
 
 globalThis.localStorage = localStorageShim;
 globalThis.window = {
@@ -134,6 +136,37 @@ globalThis.location = { origin: "http://127.0.0.1:9999" };
 	// Path resolution.
 	if (resolveLocalPath("/a/b", "../c/d.txt") !== "/a/c/d.txt") throw new Error("resolveLocalPath mismatch");
 	console.log("preview helpers OK (markdown rewrite, TOC, URL normalization, path resolution)");
+}
+
+// ── new pure helpers: lang detection, mermaid fences, CSV parsing ─────────
+{
+	const { langFromPath, splitMermaidFences, parseCsv, csvNumericColumns } = helpers;
+	if (langFromPath("x.py") !== "python") throw new Error(`langFromPath("x.py") !== "python": ${langFromPath("x.py")}`);
+	if (langFromPath("x.unknownext") !== null) throw new Error(`langFromPath unknown should be null: ${langFromPath("x.unknownext")}`);
+	if (langFromPath("x.tsx") !== "tsx") throw new Error(`langFromPath("x.tsx") !== "tsx"`);
+	if (langFromPath("X.JS") !== "jsx") throw new Error(`langFromPath must be case-insensitive`);
+	if (langFromPath("Dockerfile") !== null) throw new Error("dockerfile must NOT be a language alias");
+	const segs = splitMermaidFences("before\n```mermaid\ngraph TD\n  A-->B\n```\nafter");
+	if (segs.length !== 3) throw new Error("splitMermaidFences segment count: " + JSON.stringify(segs));
+	if (segs[0].kind !== "markdown" || segs[1].kind !== "mermaid" || segs[2].kind !== "markdown") throw new Error("splitMermaidFences kinds: " + JSON.stringify(segs));
+	if (segs[1].code !== "graph TD\n  A-->B") throw new Error("splitMermaidFences code: " + JSON.stringify(segs[1].code));
+	if (!segs[0].text.includes("before") || !segs[2].text.includes("after")) throw new Error("splitMermaidFences surrounding text lost");
+	// Tilde-fenced and attribute-laden mermaid infos are matched too; a fence
+	// with no surrounding text yields a single mermaid segment.
+	const tilded = splitMermaidFences("~~~mermaid {align=center}\nsequenceDiagram\n~~~");
+	if (tilded.length !== 1 || tilded[0].kind !== "mermaid") throw new Error("tilde mermaid fence not split: " + JSON.stringify(tilded));
+	if (tilded[0].code !== "sequenceDiagram") throw new Error("tilde mermaid code: " + JSON.stringify(tilded[0].code));
+	const csv = parseCsv('"a,b",c');
+	if (JSON.stringify(csv.rows) !== JSON.stringify([["a,b", "c"]])) throw new Error("parseCsv quoted comma: " + JSON.stringify(csv.rows));
+	if (csv.delimiter !== ",") throw new Error("parseCsv quoted comma should detect comma: " + csv.delimiter);
+	const csvTab = parseCsv("a\tb\n1\t2");
+	if (JSON.stringify(csvTab.rows) !== JSON.stringify([["a", "b"], ["1", "2"]])) throw new Error("parseCsv tab: " + JSON.stringify(csvTab.rows));
+	if (csvTab.delimiter !== "\t") throw new Error("parseCsv tab detect: " + csvTab.delimiter);
+	const nums = csvNumericColumns(parseCsv("name,age,score\nAl,30,9.5\nBo,42,8").rows);
+	if (JSON.stringify(nums) !== JSON.stringify([1, 2])) throw new Error("csvNumericColumns: " + JSON.stringify(nums));
+	const mixed = csvNumericColumns(parseCsv("name,age,score\nAl,30,n\/a\nBo,42,8").rows);
+	if (JSON.stringify(mixed) !== JSON.stringify([1])) throw new Error("csvNumericColumns should skip non-numeric columns: " + JSON.stringify(mixed));
+	console.log("preview helpers OK (langFromPath, splitMermaidFences, parseCsv, csvNumericColumns)");
 }
 
 // ── mock plugin context ──────────────────────────────────────────────────

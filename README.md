@@ -59,17 +59,31 @@ That one decision buys a lot:
   (auto-refresh). A **Preview** tab renders markdown with the app's own
   renderer (headings, tables, task lists, syntax-highlighted code with a
   copy button, math — and relative images resolved from the local disk),
-  opens local `.html` pages in a sandboxed frame, shows images (click to
-  zoom, dimensions), and falls back to a hex dump for binary files. A URL
-  bar in the preview opens any web page (external links land in the system
-  browser). Previews re-render automatically when the file changes on
-  disk (text 1 MiB / images 8 MiB caps).
+  renders **mermaid diagrams** (bundled with the app, works offline) and
+  **CSV/TSV tables with line/bar charts**, opens local `.html` pages in a
+  sandboxed frame, shows images (click to zoom, dimensions),
+  syntax-highlights source code files (shiki, the app's own highlighter),
+  and falls back to a hex dump for binary files. A URL bar in the preview
+  opens any web page (external links land in the system browser). Previews
+  re-render automatically when the file changes on disk (text 1 MiB /
+  images 8 MiB caps).
 - **Wired into the harness.** Right-click a file → *Send path to agent*
   inserts its workspace-relative path into the composer; images can be
-  attached to a message; the workspace picker (hero + sidebar + settings) is
-  the panel in "choose a folder" mode instead of an OS dialog.
+  attached to a message — or just **drag an image file into the window**:
+  it lands in the composer as a real attachment (any other file inserts its
+  path). The workspace picker (hero + sidebar + settings) is the panel in
+  "choose a folder" mode instead of an OS dialog.
+- **Links that work.** Every `http(s)`/`mailto` link in the chat and in
+  markdown previews opens in your system browser — no more dead
+  `target="_blank"` clicks inside the webview.
+- **Chat search (Ctrl/Cmd+F).** A quick-search bar over the conversation:
+  live case-insensitive highlighting, Enter/↑/↓ to jump between matches,
+  Esc to leave. Highlights are painted over the text without touching the
+  message DOM, so streaming re-renders never corrupt the chat.
 - **Tray + close-to-tray.** Closing the window hides it; running agents keep
-  working.
+  working. The tray menu carries a **live agent monitor**: every running
+  agent with a refreshable log tail and a **Stop agent** action, plus a
+  badge on the tray icon when an agent finishes (cleared from the menu).
 - **Native notifications** on agent finish, error, and question events.
 - **One-click updates.** Download, apply, restart. Nothing is applied
   automatically; background checks are opt-in (off by default).
