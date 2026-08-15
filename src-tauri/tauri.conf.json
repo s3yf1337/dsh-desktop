@@ -19,7 +19,7 @@
         "visible": false,
         "resizable": true,
         "center": true,
-        "devtools": true
+        "devtools": false
       }
     ],
     "security": {

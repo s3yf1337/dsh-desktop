@@ -5,7 +5,7 @@
  */
 
 export const NS: "desktopShell";
-export const inject: readonly ["slots"];
+export const inject: readonly ["slots", "workspaces"];
 
 interface DesktopSettings {
 	tray: boolean;

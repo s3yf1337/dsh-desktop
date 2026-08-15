@@ -117,7 +117,7 @@ pub fn desktop_open_release(app: AppHandle) -> Result<(), String> {
 		.as_ref()
 		.map(|info| info.url.clone())
 		.unwrap_or_else(|| crate::updater::RELEASES_URL.to_string());
-	eprintln!("dsh-desktop: opening {url}");
+	crate::log::info(&app, &format!("opening {url}"));
 	open::that(&url).map_err(|error| error.to_string())
 }
 
@@ -142,4 +142,25 @@ pub fn desktop_reset_geometry(app: AppHandle) -> Result<(), String> {
 pub fn desktop_test_notification(app: AppHandle) -> Result<(), String> {
 	crate::update::notify(&app, "dsh-desktop", "Notifications work!");
 	Ok(())
+}
+
+/// Open the native folder picker and return the chosen directory (None when
+/// the user cancels). Backs the "Choose workspace folder" row in the settings
+/// tab and the drop-a-folder flow.
+#[tauri::command]
+pub async fn desktop_pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+	use tauri_plugin_dialog::DialogExt;
+	let (sender, receiver) = tokio::sync::oneshot::channel();
+	app.dialog().file().pick_folder(move |picked| {
+		let _ = sender.send(picked.map(|path| path.to_string()));
+	});
+	let picked = receiver.await.map_err(|error| format!("dialog channel: {error}"))?;
+	Ok(picked)
+}
+
+/// Whether a dropped path is a directory (drag & drop decides between opening
+/// a workspace and letting the webview handle files).
+#[tauri::command]
+pub fn desktop_is_directory(path: String) -> Result<bool, String> {
+	Ok(std::fs::metadata(&path).map(|meta| meta.is_dir()).unwrap_or(false))
 }

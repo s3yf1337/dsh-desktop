@@ -68,7 +68,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 				let state = app.state::<AppState>();
 				let info = state.update.lock().unwrap().clone();
 				if let Some(info) = info {
-					eprintln!("dsh-desktop: opening release page {}", info.url);
+					crate::log::info(app, &format!("opening release page {}", info.url));
 					let _ = open::that(info.url);
 				}
 			}
@@ -104,7 +104,7 @@ pub fn rebuild(app: &AppHandle) {
 			Ok(menu) => {
 				let _ = tray.set_menu(Some(menu));
 			}
-			Err(error) => eprintln!("dsh-desktop: cannot rebuild tray menu: {error}"),
+			Err(error) => crate::log::warn(app, &format!("cannot rebuild tray menu: {error}")),
 		}
 	}
 }

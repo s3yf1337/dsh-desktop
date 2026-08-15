@@ -19,11 +19,11 @@ window.__ModuleLoader__.load({
 		* instead of dead controls.
 		*/
 		const { createElement: h, useState, useEffect, useCallback } = react;
-		const { Button, IconDownloadOutline16, IconRefreshOutline14, IconGlobeOutline14, IconSettingsOutline16 } =
+		const { Button, IconDownloadOutline16, IconRefreshOutline14, IconGlobeOutline14, IconSettingsOutline16, IconFolderOpenOutline16 } =
 			_deepseek_ai_dsh_client_ui_primitives;
 
 		const NS = "desktopShell";
-		const inject = ["slots"];
+		const inject = ["slots", "workspaces"];
 
 		const STATE_EVENT = "desktop://state";
 
@@ -120,7 +120,7 @@ window.__ModuleLoader__.load({
 			return error && typeof error === "object" && error.message ? error.message : String(error);
 		}
 
-		function DesktopSection() {
+		function DesktopSection({ openWorkspace }) {
 			const tauri = typeof window !== "undefined" && window.__TAURI__ !== void 0 && window.__TAURI__.core !== void 0;
 			const [state, setState] = useState(null);
 			const [error, setError] = useState(null);
@@ -180,6 +180,23 @@ window.__ModuleLoader__.load({
 					setError(errText(caught));
 				}
 			}, []);
+
+			// Native folder picker → attach the chosen directory as a workspace.
+			const pickWorkspace = useCallback(async () => {
+				if (busy) return;
+				setBusy(true);
+				try {
+					setError(null);
+					const path = await window.__TAURI__.core.invoke("desktop_pick_directory");
+					if (typeof path === "string" && path !== "" && typeof openWorkspace === "function") {
+						await openWorkspace(path);
+					}
+				} catch (caught) {
+					setError(errText(caught));
+				} finally {
+					setBusy(false);
+				}
+			}, [busy]);
 
 			// No native client: this harness runs in a plain browser.
 			if (!tauri) {
@@ -253,6 +270,21 @@ window.__ModuleLoader__.load({
 					})
 				),
 
+				// Workspace.
+				h("div", { style: CARD },
+					h("div", { style: H3 }, "Workspace"),
+					h(Row, {
+						label: "Choose folder…",
+						hint: "Open a native folder picker and attach the chosen directory as a workspace. You can also just drag a folder into the window.",
+						control: h(Button, {
+							size: "sm",
+							icon: h(IconFolderOpenOutline16, {}),
+							disabled: busy,
+							onClick: () => pickWorkspace()
+						}, "Pick folder")
+					})
+				),
+
 				// Notifications.
 				h("div", { style: CARD },
 					h("div", { style: H3 }, "Notifications"),
@@ -300,14 +332,44 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/** Attach a directory as the harness workspace (plugin-ctx bound). */
+		function openWorkspace(ctx, path) {
+			return ctx.workspaces.create({ path }).then(
+				() => console.log(`dsh-desktop: opened workspace ${path}`),
+				(error) => console.error(`dsh-desktop: cannot open workspace ${path}:`, error)
+			);
+		}
+
 		/** Register the section once the settings surface declares its section slot. */
 		function apply(ctx) {
+			// Native folder integration: dropping a directory onto the window
+			// opens it as a workspace. Files are left to the webview, which
+			// handles attachments. The tauri core emits this event to the
+			// webview on every drop; directory-ness is checked natively.
+			if (typeof window !== "undefined" && window.__TAURI__ !== void 0 && window.__TAURI__.core !== void 0) {
+				window.__TAURI__.event
+					.listen("tauri://drag-drop", (event) => {
+						const payload = event.payload;
+						if (payload === null || typeof payload !== "object" || !Array.isArray(payload.paths)) return;
+						for (const path of payload.paths) {
+							if (typeof path !== "string" || path === "") continue;
+							window.__TAURI__.core
+								.invoke("desktop_is_directory", { path })
+								.then((isDirectory) => {
+									if (isDirectory === true) openWorkspace(ctx, path);
+								})
+								.catch(() => {});
+						}
+					})
+					.catch(() => {});
+			}
 			ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",
 				id: "desktop",
 				order: 20,
 				label: () => "dsh-desktop",
-				locale: NS
+				locale: NS,
+				inject: () => ({ openWorkspace: (path) => openWorkspace(ctx, path) })
 			}, DesktopSection));
 		}
 		//#endregion

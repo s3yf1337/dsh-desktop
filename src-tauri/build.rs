@@ -11,8 +11,21 @@ fn main() {
 				"desktop_open_release",
 				"desktop_reset_geometry",
 				"desktop_test_notification",
+				"desktop_pick_directory",
+				"desktop_is_directory",
 			]),
 		),
 	)
 	.expect("failed to run tauri-build");
+
+	// tauri.conf.json ships `devtools: false` (release builds must not expose
+	// the inspector). Debug builds re-enable it by merging an override through
+	// TAURI_CONFIG (emitted for the crate compile, where the codegen runs).
+	// A caller-supplied TAURI_CONFIG always wins.
+	if std::env::var("PROFILE").as_deref() == Ok("debug") && std::env::var_os("TAURI_CONFIG").is_none() {
+		println!(
+			"cargo:rustc-env=TAURI_CONFIG={}",
+			r#"{"app":{"windows":[{"label":"main","devtools":true}]}}"#
+		);
+	}
 }

@@ -13,6 +13,8 @@
     "allow-desktop-check-updates",
     "allow-desktop-open-release",
     "allow-desktop-reset-geometry",
-    "allow-desktop-test-notification"
+    "allow-desktop-test-notification",
+    "allow-desktop-pick-directory",
+    "allow-desktop-is-directory"
   ]
 }

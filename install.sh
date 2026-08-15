@@ -126,9 +126,11 @@ fi
 if [[ "${DSH_DESKTOP_PREFIX:-}" ]]; then
   BIN_DIR="$DSH_DESKTOP_PREFIX/bin"
   APP_DIR="$DSH_DESKTOP_PREFIX/share/applications"
+  ICON_DIR="$DSH_DESKTOP_PREFIX/share/icons/hicolor"
 else
   BIN_DIR="${HOME}/.local/bin"
   APP_DIR="${HOME}/.local/share/applications"
+  ICON_DIR="${HOME}/.local/share/icons/hicolor"
 fi
 
 mkdir -p "$BIN_DIR" "$APP_DIR"
@@ -144,6 +146,23 @@ chmod +x "$BIN_DIR/dsh-desktop-shell"
 cp -f "$SCRIPT_DIR/dsh-desktop" "$BIN_DIR/dsh-desktop"
 chmod +x "$BIN_DIR/dsh-desktop"
 
+# Application icon into the hicolor theme so the menu entry shows the real
+# icon instead of a generic terminal glyph.
+ICON_NAME="deepseek-harness"
+for size in 32x32 128x128 256x256 512x512; do
+  ICON_SIZE_DIR="$ICON_DIR/$size/apps"
+  mkdir -p "$ICON_SIZE_DIR"
+  case "$size" in
+    32x32)   SRC_ICON="$SCRIPT_DIR/src-tauri/icons/32x32.png" ;;
+    128x128) SRC_ICON="$SCRIPT_DIR/src-tauri/icons/128x128.png" ;;
+    256x256) SRC_ICON="$SCRIPT_DIR/src-tauri/icons/128x128@2x.png" ;;
+    512x512) SRC_ICON="$SCRIPT_DIR/src-tauri/icons/512x512.png" ;;
+  esac
+  if [[ -f "$SRC_ICON" ]]; then
+    cp -f "$SRC_ICON" "$ICON_SIZE_DIR/$ICON_NAME.png"
+  fi
+done
+
 DESKTOP_FILE="$APP_DIR/dsh-desktop.desktop"
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -152,7 +171,7 @@ Name=DeepSeek Harness
 GenericName=AI Coding Assistant
 Comment=Desktop profile for the DeepSeek Harness (native window over the web surface)
 Exec=$BIN_DIR/dsh-desktop
-Icon=utilities-terminal
+Icon=$ICON_NAME
 Terminal=false
 Categories=Development;Utility;
 StartupWMClass=dsh-desktop

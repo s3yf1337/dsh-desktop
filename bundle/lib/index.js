@@ -137,9 +137,20 @@ function apply(ctx, config) {
 		return "The agent is asking you a question.";
 	};
 
-	// Mirror agent lifecycle into notifications. All subscriptions are app-level
-	// cordis events; listeners are disposed with the plugin.
+	// Mirror agent lifecycle into notifications + the window title. All
+	// subscriptions are app-level cordis events; listeners are disposed with
+	// the plugin.
 	const disposeListeners = [];
+	// The session whose title the window currently reflects (most recently
+	// started agent work).
+	let titleSession = null;
+	const pushWindowTitle = (id) => {
+		const title = titles.get(id);
+		writeControl({
+			event: "title",
+			title: typeof title === "string" && title !== "" ? `DeepSeek Harness — ${title}` : null
+		});
+	};
 	if (typeof ctx.on === "function") {
 		disposeListeners.push(ctx.on("agent/status", ({ agent, status }) => {
 			const id = agent?.id;
@@ -147,7 +158,10 @@ function apply(ctx, config) {
 			const wasRunning = running.get(id) ?? false;
 			const isRunning = status === "running";
 			running.set(id, isRunning);
-			if (wasRunning && !isRunning) {
+			if (isRunning && !wasRunning) {
+				titleSession = id;
+				pushWindowTitle(id);
+			} else if (wasRunning && !isRunning) {
 				const title = titles.get(id);
 				writeControl({
 					event: "notify",
@@ -156,6 +170,10 @@ function apply(ctx, config) {
 						? `"${title}" — work complete.`
 						: `Session ${id} finished its work.`
 				});
+				if (titleSession === id) {
+					titleSession = null;
+					writeControl({ event: "title", title: null });
+				}
 			}
 		}));
 		disposeListeners.push(ctx.on("agent/error", ({ agent, error }) => {
@@ -168,6 +186,7 @@ function apply(ctx, config) {
 		disposeListeners.push(ctx.on("session/event", (session, event) => {
 			if (event?.type === "session/title" && typeof event.data?.title === "string") {
 				titles.set(session?.id, event.data.title);
+				if (session?.id === titleSession) pushWindowTitle(session.id);
 			} else if (event?.type === "tool/call" && event.data?.name === "ask_user_question") {
 				writeControl({
 					event: "notify",

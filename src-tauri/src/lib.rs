@@ -23,6 +23,7 @@
 //! tab through the `desktop_*` commands.
 
 mod commands;
+mod log;
 mod settings;
 mod tray;
 mod update;
@@ -47,6 +48,8 @@ pub struct AppState {
 	pub check_error: Mutex<Option<String>>,
 	/// Set by the tray's Quit so the close handler stops swallowing closes.
 	pub quitting: AtomicBool,
+	/// App config directory (log file lives here).
+	pub config_dir: Mutex<String>,
 }
 
 impl Default for AppState {
@@ -57,6 +60,7 @@ impl Default for AppState {
 			last_check: Mutex::new(None),
 			check_error: Mutex::new(None),
 			quitting: AtomicBool::new(false),
+			config_dir: Mutex::new(String::new()),
 		}
 	}
 }
@@ -117,6 +121,8 @@ pub fn run() {
 		)
 		// Native OS notifications (update available, tray hints, tests).
 		.plugin(tauri_plugin_notification::init())
+		// Native file dialogs (workspace folder picker).
+		.plugin(tauri_plugin_dialog::init())
 		.manage(AppState::default())
 		.invoke_handler(tauri::generate_handler![
 			commands::desktop_get_state,
@@ -125,6 +131,8 @@ pub fn run() {
 			commands::desktop_open_release,
 			commands::desktop_reset_geometry,
 			commands::desktop_test_notification,
+			commands::desktop_pick_directory,
+			commands::desktop_is_directory,
 		])
 		.setup(|app| {
 			// reqwest is built with `rustls-no-provider`; ring is the provider.
@@ -138,13 +146,18 @@ pub fn run() {
 			// Load persisted preferences into the managed state.
 			let config_dir = app.path().app_config_dir()?;
 			let loaded = settings::load(&config_dir);
-			*app.state::<AppState>().settings.lock().unwrap() = loaded;
+			{
+				let state = app.state::<AppState>();
+				*state.settings.lock().unwrap() = loaded;
+				*state.config_dir.lock().unwrap() = config_dir.to_string_lossy().into_owned();
+			}
+			log::info(app.handle(), "desktop shell starting");
 
 			// The tray is the window's second life. A desktop without a tray
 			// host (no StatusNotifierWatcher) must not break the app: fall back
 			// to the plain close-exits behavior by disabling the tray setting.
 			if let Err(error) = tray::setup(app.handle()) {
-				eprintln!("dsh-desktop: tray unavailable, falling back to close-exits: {error}");
+				log::warn(app.handle(), &format!("tray unavailable, falling back to close-exits: {error}"));
 				app.state::<AppState>().settings.lock().unwrap().tray = false;
 			}
 
@@ -167,9 +180,9 @@ pub fn run() {
 			}
 
 			// Control channel: the profile's desktop-shell plugin pipes JSON
-			// control messages into our stdin (agent lifecycle → notifications).
-			// Read them on a background thread; the client's stdin is otherwise
-			// unused.
+			// control messages into our stdin (agent lifecycle → notifications,
+			// session titles → window title). Read them on a background thread;
+			// the client's stdin is otherwise unused.
 			{
 				let handle = app.handle().clone();
 				std::thread::spawn(move || {
@@ -184,18 +197,33 @@ pub fn run() {
 						let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
 							continue;
 						};
-						if message.get("event").and_then(|v| v.as_str()) != Some("notify") {
-							continue;
+						match message.get("event").and_then(|v| v.as_str()) {
+							Some("notify") => {
+								let title = message
+									.get("title")
+									.and_then(|v| v.as_str())
+									.unwrap_or("DeepSeek Harness");
+								let body = message.get("body").and_then(|v| v.as_str()).unwrap_or("");
+								update::control_notify(&handle, title, body);
+							}
+							Some("title") => {
+								let title = message.get("title").and_then(|v| v.as_str());
+								if let Some(win) = handle.get_webview_window("main") {
+									let _ = win.set_title(
+										title.filter(|t| !t.is_empty()).unwrap_or("DeepSeek Harness"),
+									);
+								}
+							}
+							_ => {}
 						}
-						let title = message
-							.get("title")
-							.and_then(|v| v.as_str())
-							.unwrap_or("DeepSeek Harness");
-						let body = message.get("body").and_then(|v| v.as_str()).unwrap_or("");
-						update::control_notify(&handle, title, body);
 					}
 				});
 			}
+
+			// Drag & drop is handled client-side: the webview receives the
+			// `tauri://drag-drop` event and the settings tab's browser half
+			// opens dropped directories as workspaces (files keep flowing to
+			// the SPA as attachments).
 			Ok(())
 		})
 		.build(tauri::generate_context!())
@@ -240,7 +268,7 @@ pub fn run() {
 							);
 						}
 					}
-					eprintln!("dsh-desktop: window hidden to tray (Quit from the tray to exit)");
+					log::info(app_handle, "window hidden to tray (Quit from the tray to exit)");
 				}
 			}
 		}

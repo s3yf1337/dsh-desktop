@@ -44,7 +44,7 @@ pub async fn run_check(app: &AppHandle, with_notification: bool) {
 					if with_notification && newly_available && notifications_enabled {
 						notify(app, "Update available", &format!("dsh-desktop {} is out — open it from the tray or Settings.", info.version));
 					}
-					eprintln!("dsh-desktop: update available: {}", info.version);
+					crate::log::info(app, &format!("update available: {}", info.version));
 				}
 				None => {
 					*state.update.lock().unwrap() = None;
@@ -53,7 +53,7 @@ pub async fn run_check(app: &AppHandle, with_notification: bool) {
 					drop(state);
 					emit_and_rebuild(app);
 					if with_notification {
-						eprintln!("dsh-desktop: up to date ({} vs {})", current, release.tag_name);
+						crate::log::info(app, &format!("up to date ({current} vs {})", release.tag_name));
 					}
 				}
 			}
@@ -65,14 +65,14 @@ pub async fn run_check(app: &AppHandle, with_notification: bool) {
 			drop(state);
 			emit_and_rebuild(app);
 			if with_notification {
-				eprintln!("dsh-desktop: no releases published yet; up to date");
+				crate::log::info(app, "no releases published yet; up to date");
 			}
 		}
 		Err(error) => {
 			*state.check_error.lock().unwrap() = Some(error.clone());
 			drop(state);
 			emit_and_rebuild(app);
-			eprintln!("dsh-desktop: update check failed: {error}");
+			crate::log::error(app, &format!("update check failed: {error}"));
 		}
 	}
 }
@@ -112,7 +112,7 @@ pub fn notify(app: &AppHandle, title: &str, body: &str) {
 		.body(body)
 		.show()
 	{
-		eprintln!("dsh-desktop: notification failed: {error}");
+		crate::log::warn(app, &format!("notification failed: {error}"));
 	}
 }
 
