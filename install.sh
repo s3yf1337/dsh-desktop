@@ -164,13 +164,22 @@ for size in 32x32 128x128 256x256 512x512; do
 done
 
 DESKTOP_FILE="$APP_DIR/dsh-desktop.desktop"
+# Quote + escape the launcher path per the desktop entry spec: wrap it in
+# double quotes and backslash-escape `"`, backtick, `$` and `\` so a prefix
+# with spaces or shell metacharacters stays a single Exec argument.
+# (The BIN_DIR is substituted by bash first; the escaped form must survive the
+# heredoc, so escape backslashes and quotes for it too.)
+ESCAPED_BIN_DIR="${BIN_DIR//\\/\\\\}"
+ESCAPED_BIN_DIR="${ESCAPED_BIN_DIR//\"/\\\"}"
+ESCAPED_BIN_DIR="${ESCAPED_BIN_DIR//\`/\\\`}"
+ESCAPED_BIN_DIR="${ESCAPED_BIN_DIR//\$/\\\$}"
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DeepSeek Harness
 GenericName=AI Coding Assistant
 Comment=Desktop profile for the DeepSeek Harness (native window over the web surface)
-Exec=$BIN_DIR/dsh-desktop
+Exec="$ESCAPED_BIN_DIR/dsh-desktop"
 Icon=$ICON_NAME
 Terminal=false
 Categories=Development;Utility;
