@@ -70,6 +70,9 @@ pub struct AppState {
 	pub tray_icon_original: Mutex<Option<tauri::image::Image<'static>>>,
 	/// Serializes the control writes to stdout (the `dshdctl:` protocol).
 	pub control_out: Mutex<()>,
+	/// Serializes tray-menu rebuilds (key check + build + swap must be
+	/// atomic across the stdin thread, async update tasks and menu events).
+	pub rebuild_lock: Mutex<()>,
 }
 
 impl Default for AppState {
@@ -86,6 +89,7 @@ impl Default for AppState {
 			finished_agents: Mutex::new(Vec::new()),
 			tray_icon_original: Mutex::new(None),
 			control_out: Mutex::new(()),
+			rebuild_lock: Mutex::new(()),
 		}
 	}
 }
@@ -396,7 +400,17 @@ fn run_window(raw: String) -> i32 {
 										agents.push(AgentInfo { id, title, status });
 									}
 								}
-								*handle.state::<AppState>().agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = agents;
+								{
+									let state = handle.state::<AppState>();
+									let mut agents_guard = state.agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+									*agents_guard = agents;
+									// Log tails for agents that dropped out are
+									// dead weight — prune them with the snapshot.
+									let live: std::collections::HashSet<String> =
+										agents_guard.iter().map(|agent| agent.id.clone()).collect();
+									let mut logs = state.agent_logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+									logs.retain(|id, _| live.contains(id));
+								}
 								crate::tray::rebuild(&handle);
 							}
 							Some("agent-finished") => {
@@ -410,6 +424,9 @@ fn run_window(raw: String) -> i32 {
 									let mut finished = state.finished_agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 									finished.insert(0, FinishedInfo { id: id.clone(), title, time_ms });
 									finished.truncate(10);
+									// The agent's log tail is not needed once it
+									// is done — keep the map from growing forever.
+									state.agent_logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
 								}
 								drop(state);
 								crate::log::info(&handle, &format!("tray: badge: agent {id} finished"));

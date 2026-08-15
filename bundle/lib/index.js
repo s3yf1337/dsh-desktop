@@ -136,7 +136,7 @@ const DSHD_FILE_MIME = {
 const DSHD_FILE_BRIDGE = `<script>(()=>{const post=(m)=>{try{parent.postMessage({source:"dshd-file",...m},"*")}catch{}};
 try{post({type:"title",title:document.title})}catch{}
 document.addEventListener("click",(e)=>{const a=e.target&&e.target.closest?e.target.closest("a[href]"):null;if(!a)return;
-const href=a.getAttribute("href")||"";const external=/^(https?:|mailto:)/i.test(href)||a.target==="_blank";
+const href=a.getAttribute("href")||"";const external=/^(https?:|mailto:)/i.test(href)||(a.target==="_blank"&&!/^(javascript:|data:|file:|vbscript:|blob:)/i.test(href));
 if(external){e.preventDefault();e.stopPropagation();post({type:"open",url:a.href})}},true)})();<\/script>`;
 
 /** Loopback client addresses (IPv4, IPv6, and the v4-mapped form). */

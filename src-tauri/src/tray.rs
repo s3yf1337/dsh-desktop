@@ -49,8 +49,16 @@ pub const LOG_CAP: usize = 40;
 /// The number of finished entries the tray menu shows.
 const FINISHED_MENU_SHOWN: usize = 3;
 /// The last `menu_key` we actually set on the tray, so a rebuild whose state
-/// has not changed can be skipped (avoids pointless menu churn).
+/// has not changed can be skipped (avoids pointless menu churn). Written only
+/// on a successful set_menu, so a failed build does not freeze the menu.
 static LAST_MENU_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Length-prefix one field of the fingerprint: `len:value`. Delimiters inside
+/// the value cannot then collide with the delimiters between fields (a title
+/// containing `|`/`;` must not alias a different state).
+fn enc(value: &str) -> String {
+	format!("{}:{value};", value.len())
+}
 
 /// A deterministic fingerprint of everything `build_menu` renders; callers
 /// rebuild only when it changes.
@@ -59,7 +67,9 @@ fn menu_key(state: &AppState) -> String {
 		let agents = state.agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let mut key = String::new();
 		for agent in agents.iter() {
-			key.push_str(&format!("{}|{}|{};", agent.id, agent.title, agent.status));
+			key.push_str(&enc(&agent.id));
+			key.push_str(&enc(&agent.title));
+			key.push_str(&enc(&agent.status));
 		}
 		key
 	};
@@ -67,7 +77,9 @@ fn menu_key(state: &AppState) -> String {
 		let finished = state.finished_agents.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let mut key = String::new();
 		for entry in finished.iter() {
-			key.push_str(&format!("{}|{}|{};", entry.id, entry.title, entry.time_ms));
+			key.push_str(&enc(&entry.id));
+			key.push_str(&enc(&entry.title));
+			key.push_str(&enc(&entry.time_ms.to_string()));
 		}
 		key
 	};
@@ -85,7 +97,11 @@ fn menu_key(state: &AppState) -> String {
 		let logs = state.agent_logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let mut key = String::new();
 		for (id, lines) in logs.iter() {
-			key.push_str(&format!("{id}={}:{};", lines.len(), lines.join("\u{1f}")));
+			key.push_str(&enc(id));
+			key.push_str(&enc(&lines.len().to_string()));
+			for line in lines.iter() {
+				key.push_str(&enc(line));
+			}
 		}
 		key
 	};
@@ -120,17 +136,18 @@ fn append_agent_section<'a>(
 		let header = MenuItem::with_id(app, "agents-heading", format!("Agents ({} running)", agents.len()), false, None::<&str>)?;
 		builder = builder.item(&header);
 
-		for agent in agents.iter() {
+		for (agent_index, agent) in agents.iter().enumerate() {
 			let title = if agent.title.is_empty() { agent.id.clone() } else { agent.title.clone() };
 			let mut sub = SubmenuBuilder::new(app, &title);
 
 			match logs.get(&agent.id) {
 				Some(lines) if !lines.is_empty() => {
 					// The log is stored oldest-first; show the tail (last ≤ 8)
-					// in chronological order.
-					for line in lines.iter().skip(lines.len().saturating_sub(8)) {
+					// in chronological order. Ids are index-scoped so two
+					// identical truncated lines never collide.
+					for (line_index, line) in lines.iter().skip(lines.len().saturating_sub(8)).enumerate() {
 						let text = truncate_line(line, 56);
-						let item = MenuItem::with_id(app, format!("log-line-{}-{}", agent.id, text), text, false, None::<&str>)?;
+						let item = MenuItem::with_id(app, format!("log-line-{agent_index}-{line_index}"), text, false, None::<&str>)?;
 						sub = sub.item(&item);
 					}
 				}
@@ -151,10 +168,10 @@ fn append_agent_section<'a>(
 	}
 
 	if !finished.is_empty() {
-		for entry in finished.iter().take(FINISHED_MENU_SHOWN) {
+		for (entry_index, entry) in finished.iter().take(FINISHED_MENU_SHOWN).enumerate() {
 			let time = short_time(entry.time_ms);
-			let text = format!("✓ \"{}\" finished at {time}", entry.title);
-			let item = MenuItem::with_id(app, format!("finished-{}", entry.id), text, false, None::<&str>)?;
+			let text = format!("✓ \"{}\" finished at {time}", truncate_line(&entry.title, 40));
+			let item = MenuItem::with_id(app, format!("finished-{entry_index}"), text, false, None::<&str>)?;
 			builder = builder.item(&item);
 		}
 		let clear = MenuItem::with_id(app, ID_CLEAR_BADGE, "Clear finished badge", true, None::<&str>)?;
@@ -225,10 +242,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 			let id = event.id.as_ref();
 			if let Some(agent_id) = id.strip_prefix("stop-") {
 				crate::log::info(app, &format!("tray: stop requested for {agent_id}"));
-				let payload = format!(r#"{{"event":"stop-agent","id":{agent_id:?}}}"#);
+				// serde_json, not format!+{:?}: Rust's Debug escapes non-ASCII
+				// as \u{e9}-style, which is NOT valid JSON and would make the
+				// harness's JSON.parse of the dshdctl line fail silently.
+				let payload = serde_json::json!({ "event": "stop-agent", "id": agent_id }).to_string();
 				send_control(app, &payload);
 			} else if let Some(agent_id) = id.strip_prefix("get-log-") {
-				let payload = format!(r#"{{"event":"get-log","id":{agent_id:?}}}"#);
+				let payload = serde_json::json!({ "event": "get-log", "id": agent_id }).to_string();
 				send_control(app, &payload);
 			} else {
 				match id {
@@ -274,26 +294,33 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Rebuild the tray menu (call after the update state changes), skipping the
-/// work when nothing the menu renders has actually changed.
+/// work when nothing the menu renders has actually changed. Rebuilds are
+/// serialized (stdin thread + async update tasks + menu events can all call
+/// this): the key check, the build and the swap happen under one lock, so a
+/// stale builder can never land last, and LAST_MENU_KEY is written only after
+/// a successful set_menu (a failed build must not freeze later rebuilds).
 pub fn rebuild(app: &AppHandle) {
-	if let Some(tray) = app.tray_by_id("main") {
-		let state = app.state::<AppState>();
-		let key = menu_key(&state);
-		{
-			let mut last = LAST_MENU_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-			if last.as_deref() == Some(key.as_str()) {
+	let Some(tray) = app.tray_by_id("main") else { return };
+	let state = app.state::<AppState>();
+	let _guard = state.rebuild_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	let key = menu_key(&state);
+	{
+		let mut last = LAST_MENU_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if last.as_deref() == Some(key.as_str()) {
+			return;
+		}
+	}
+	let update = state.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+	match build_menu(app, update.as_ref()) {
+		Ok(menu) => {
+			if let Err(error) = tray.set_menu(Some(menu)) {
+				crate::log::warn(app, &format!("cannot set tray menu: {error}"));
 				return;
 			}
-			*last = Some(key);
+			*LAST_MENU_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
+			set_tooltip(app);
 		}
-		let update = state.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-		match build_menu(app, update.as_ref()) {
-			Ok(menu) => {
-				let _ = tray.set_menu(Some(menu));
-				set_tooltip(app);
-			}
-			Err(error) => crate::log::warn(app, &format!("cannot rebuild tray menu: {error}")),
-		}
+		Err(error) => crate::log::warn(app, &format!("cannot rebuild tray menu: {error}")),
 	}
 }
 

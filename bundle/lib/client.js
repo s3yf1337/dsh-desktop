@@ -473,7 +473,13 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 
 			// Sandboxes preview iframes use their own dshd-file bridge — their
 			// document is separate, so a global capture listener never sees
-			// those clicks. Only top-level http(s)/mailto/_blank links drop in.
+			// those clicks. Only top-level http(s)/mailto links drop in; a
+			// `target="_blank"` or `rel=external` hint on an anchor with a
+			// NON-http scheme (file:, data:, vbscript:, blob:, javascript:)
+			// must never reach the OS opener — leave those to the webview
+			// default (which is to do nothing).
+			const EXTERNAL_SCHEME = /^(https?:|mailto:)/i;
+			const DANGEROUS_SCHEME = /^(javascript:|data:|file:|vbscript:|blob:)/i;
 			document.addEventListener(
 				"click",
 				(event) => {
@@ -484,11 +490,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						const anchor = event.target && typeof event.target.closest === "function" ? event.target.closest("a[href]") : null;
 						if (!anchor) return;
 						const href = anchor.getAttribute("href") || "";
-						// Never hand a javascript: URL to the OS opener, even if
-						// the anchor also carries target=_blank / rel=external.
-						if (/^javascript:/i.test(href)) return;
-						const external =
-							/^(https?:|mailto:)/i.test(href) || anchor.target === "_blank" || (anchor.rel || "").split(/\s+/).includes("external");
+						const hinted = anchor.target === "_blank" || (anchor.rel || "").split(/\s+/).includes("external");
+						// External = a safe absolute scheme, or a hinted anchor
+						// whose href is neither dangerous nor relative (a bare
+						// host like "example.com" still routes to the browser).
+						const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
+						const external = EXTERNAL_SCHEME.test(href) || (hinted && !DANGEROUS_SCHEME.test(href) && !hasScheme);
 						if (!external) return;
 						event.preventDefault();
 						event.stopPropagation();
@@ -1253,14 +1260,16 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 		/** Minimal RFC-4180-ish CSV/TSV parser: quoted fields may contain the
 		* delimiter and newlines; a doubled quote inside quotes is a literal
 		* quote. When `delimiter` is not "," or "\t" it is auto-detected from
-		* the first line (more tabs than commas → tab). Returns {rows, delimiter}. */
+		* the first line (the most frequent of comma/tab/semicolon wins).
+		* Returns {rows, delimiter}. */
 		function parseCsv(text, delimiter) {
 			const src = String(text).replace(/^\uFEFF/, "");
 			let delim = delimiter;
-			if (delim !== "," && delim !== "\t") {
+			if (delim !== "," && delim !== "\t" && delim !== ";") {
 				const firstLine = src.split(/\r?\n/, 1)[0] || "";
 				let commas = 0;
 				let tabs = 0;
+				let semis = 0;
 				let inQuote = false;
 				for (let i = 0; i < firstLine.length; i++) {
 					const ch = firstLine[i];
@@ -1268,9 +1277,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					else if (!inQuote) {
 						if (ch === ",") commas++;
 						else if (ch === "\t") tabs++;
+						else if (ch === ";") semis++;
 					}
 				}
-				delim = tabs > commas ? "\t" : ",";
+				if (tabs > commas && tabs > semis) delim = "\t";
+				else if (semis > commas && semis > tabs) delim = ";";
+				else delim = ",";
 			}
 			const rows = [];
 			let row = [];
@@ -1299,7 +1311,10 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						field += ch;
 					}
 				} else if (ch === '"') {
-					inQ = true;
+					// RFC-4180: a quote only STARTS a quoted segment at the
+					// beginning of a field; a mid-field quote is a literal.
+					if (field === "") inQ = true;
+					else field += ch;
 				} else if (ch === delim) {
 					pushField();
 				} else if (ch === "\n" || ch === "\r") {
@@ -4059,8 +4074,10 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			* UNKNOWN languages (mermaid, csv) through its plain fallback, whose
 			* `<code>` carries NO `language-*` class — class selectors can never
 			* match them. Detect by content instead: mermaid diagrams open with
-			* a distinctive first keyword, CSV/TSV looks tabular. */
-			function fenceKind(code) {
+			* a distinctive first keyword; CSV/TSV is only considered for the
+			* CLASSLESS (plain fallback) blocks, so a real highlighted code
+			* block like `print(a, b)` can never be mistaken for a table. */
+			function fenceKind(code, codeEl) {
 				const first = firstLine(code);
 				if (first === "") return null;
 				if (
@@ -4069,9 +4086,13 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				) {
 					return "mermaid";
 				}
-				// Tabular: the same delimiter in every non-empty line, no
-				// code-looking first line. Conservative — a prose block with
-				// one comma stays untouched.
+				// CSV: only the plain fallback (no language-* class) is
+				// eligible, the first line must look like a header (no code
+				// punctuation), and every non-empty line must carry the same
+				// delimiter count. Conservative — prose with one comma per
+				// line stays untouched only if it also passes these gates.
+				if (codeEl && typeof codeEl.className === "string" && codeEl.className.includes("language-")) return null;
+				if (/[()=;{}[\]<>]/.test(first)) return null;
 				const lines = String(code).split("\n").map((line) => line.trim()).filter((line) => line !== "");
 				if (lines.length >= 2) {
 					const firstCount = countDelims(lines[0]);
@@ -4094,14 +4115,22 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			};
 
 			/** One pass over the conversation container: every code block is
-			* classified by content and rendered when it looks like a fence. */
+			* classified by content and rendered when it looks like a fence.
+			* Also sweeps orphaned diagram siblings: when React removes a `<pre>`
+			* (message regeneration), the injected diagram that preceded it has
+			* no pre left to anchor to — drop it so no ghost stays on screen. */
 			function scan() {
 				try {
 					const scope = document.querySelector("[data-conversation-scroll]");
 					if (!scope) return;
 					for (const code of scope.querySelectorAll("pre code")) {
-						const kind = fenceKind(String(code.textContent || ""));
+						const kind = fenceKind(String(code.textContent || ""), code);
 						if (kind !== null) scanOne(code, kind);
+					}
+					for (const diagram of scope.querySelectorAll("[data-dshd-diagram]")) {
+						let sibling = diagram.nextElementSibling;
+						while (sibling && sibling.tagName !== "PRE") sibling = sibling.nextElementSibling;
+						if (!sibling) diagram.remove();
 					}
 				} catch {
 					// the observer callback must never throw
