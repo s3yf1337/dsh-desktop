@@ -7,12 +7,13 @@
 // fails this test. The title bar needs a DOM, so it is skipped here; the
 // panel and settings are the React-rendered half.
 //
-// Run: node --input-type=module test/client-smoke.mjs
+// Run: node test/client-smoke.mjs  (set DSH_NM to the dsh install with
+// react/react-dom when dsh lives elsewhere than the default below)
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const DSH_NM = "/home/seyf/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules";
+const DSH_NM = process.env.DSH_NM || "/home/seyf/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules";
 const react = require(DSH_NM + "/react");
 const { renderToString } = require(DSH_NM + "/react-dom/server");
 const h = react.createElement;
