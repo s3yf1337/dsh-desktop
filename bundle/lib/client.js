@@ -98,7 +98,11 @@ window.__ModuleLoader__.load({
 			},
 			setOpen(open) {
 				this.open = !!open;
-				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.open", this.open ? "1" : "0");
+				try {
+					if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.open", this.open ? "1" : "0");
+				} catch {
+					// storage may be unavailable/full — the toggle must still work
+				}
 				// Closing the panel while a pick flow is active cancels it.
 				if (!this.open && this.pick !== null) {
 					const owner = this.pick;
@@ -125,13 +129,21 @@ window.__ModuleLoader__.load({
 			},
 			setTab(tab) {
 				this.tab = tab;
-				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.tab", tab);
+				try {
+					if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.tab", tab);
+				} catch {
+					// best-effort persistence
+				}
 				this.notify();
 			},
 			setWidth(width) {
 				const clamped = Math.min(EXPLORER_MAX_WIDTH, Math.max(EXPLORER_MIN_WIDTH, width));
 				this.width = clamped;
-				if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.width", String(clamped));
+				try {
+					if (typeof localStorage !== "undefined") localStorage.setItem("dshd.explorer.width", String(clamped));
+				} catch {
+					// best-effort persistence
+				}
 				this.notify();
 			},
 			subscribe(fn) {
@@ -139,7 +151,13 @@ window.__ModuleLoader__.load({
 				return () => this.listeners.delete(fn);
 			},
 			notify() {
-				for (const fn of this.listeners) fn();
+				for (const fn of [...this.listeners]) {
+					try {
+						fn();
+					} catch (error) {
+						console.error("dsh-desktop: explorer store listener failed:", error);
+					}
+				}
 			}
 		};
 
@@ -217,6 +235,78 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			el.setAttribute("stroke-linecap", "round");
 			el.innerHTML = path;
 			return el;
+		}
+
+		/** Self-heal watchdog: when the store says the explorer panel should
+		* be open but no panel element exists for a while, the panel's slot
+		* entry has crashed (the app's slot boundary removes it silently).
+		* The harness runs server-side, so a webview reload restores the
+		* whole client surface without losing session state. */
+		function installPanelWatchdog() {
+			if (typeof document === "undefined" || typeof window === "undefined") return;
+			let misses = 0;
+			window.setInterval(() => {
+				try {
+					if (!explorerStore.open) {
+						misses = 0;
+						return;
+					}
+					if (document.querySelector("[data-dshd-explorer]")) {
+						misses = 0;
+						return;
+					}
+					misses += 1;
+					if (misses >= 10) {
+						console.error("dsh-desktop: explorer panel vanished while open — reloading the webview to recover");
+						window.location.reload();
+					}
+				} catch {
+					// the watchdog itself must never throw
+				}
+			}, 1000);
+		}
+
+		/** Surface webview runtime errors on screen (small fixed badge) so a
+		* silent failure is never invisible again. Shows the message of any
+		* uncaught error / unhandled rejection; disappears on reload. */
+		function installErrorBadge() {
+			if (typeof document === "undefined" || document.getElementById("dshd-error-badge")) return;
+			const badge = document.createElement("div");
+			badge.id = "dshd-error-badge";
+			badge.style.cssText =
+				"position:fixed;left:8px;bottom:8px;z-index:99999;max-width:70vw;background:#e5484d;color:#fff;" +
+				"font:12px/1.5 ui-monospace,monospace;padding:6px 10px;border-radius:8px;white-space:pre-wrap;" +
+				"word-break:break-word;display:none;box-shadow:0 4px 16px rgba(0,0,0,.35)";
+			document.body.appendChild(badge);
+			const show = (text) => {
+				badge.textContent = text;
+				badge.style.display = "block";
+			};
+			window.addEventListener("error", (event) => {
+				show(`dsh-desktop error: ${event.message || String(event.error)}
+@ ${(event.filename || "").split("/").pop()}:${event.lineno}`);
+			});
+			window.addEventListener("unhandledrejection", (event) => {
+				const reason = event.reason;
+				show(`dsh-desktop unhandled: ${reason && reason.message ? reason.message : String(reason)}`);
+			});
+			// Render errors inside the app's slot boundaries never reach
+			// window.onerror (React error boundaries swallow them) — they only
+			// land in console.error, so mirror that into the badge too.
+			const originalError = console.error;
+			console.error = (...args) => {
+				try {
+					originalError.apply(console, args);
+				} catch {
+					// the console itself failing must not break the app
+				}
+				try {
+					const text = args.map((arg) => (arg instanceof Error ? arg.message : typeof arg === "string" ? arg : arg && arg.message ? arg.message : String(arg))).join(" ");
+					if (text) show(`dsh-desktop console.error: ${text.slice(0, 500)}`);
+				} catch {
+					// badge itself must never throw
+				}
+			};
 		}
 
 		/** Mount the title bar + window controls + resize edges (native only). */
@@ -653,6 +743,19 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				return null;
 			}, [workspaces]);
 
+			// The workspace/session snapshots must stay LIVE: the store starts
+			// pending (empty) and fills over RPC, so the panel subscribes and
+			// re-reads on every change instead of freezing the first read.
+			const [storeRev, setStoreRev] = useState(0);
+			useEffect(() => {
+				if (!workspaces || typeof workspaces.list?.subscribe !== "function") return;
+				return workspaces.list.subscribe(() => setStoreRev((rev) => rev + 1));
+			}, [workspaces]);
+			useEffect(() => {
+				if (!sessions || typeof sessions.list?.subscribe !== "function") return;
+				return sessions.list.subscribe(() => setStoreRev((rev) => rev + 1));
+			}, [sessions]);
+
 			const workspaceSnapshot = useMemo(() => {
 				if (!workspaces || typeof workspaces.list?.getSnapshot !== "function") return null;
 				try {
@@ -660,7 +763,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				} catch {
 					return null;
 				}
-			}, [workspaces]);
+			}, [workspaces, storeRev]);
 
 			const sessionSnapshot = useMemo(() => {
 				if (!sessions || typeof sessions.list?.getSnapshot !== "function") return null;
@@ -669,7 +772,7 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				} catch {
 					return null;
 				}
-			}, [sessions]);
+			}, [sessions, storeRev]);
 
 			const workspaceView = (item) => {
 				if (!item) return null;
@@ -2186,6 +2289,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			explorerStore.init();
 			// Custom window title bar (native only).
 			if (hasTauri() && typeof document !== "undefined") installTitlebar();
+			// On-screen error badge (native only): makes webview runtime
+			// errors visible instead of silent.
+			if (hasTauri() && typeof document !== "undefined") installErrorBadge();
+			// Self-heal watchdog (native only): reloads the webview if the
+			// panel dies silently while the store says it is open.
+			if (hasTauri() && typeof document !== "undefined") installPanelWatchdog();
 
 			// Native folder integration: dropping a directory onto the window
 			// opens it as a workspace. Files are left to the webview, which
