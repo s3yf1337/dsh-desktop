@@ -837,12 +837,14 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				// Cmd/Ctrl+F → open chat search. The native webview has no
 				// find bar, so this hijacks the shortcut even inside inputs:
 				// the only place Ctrl+F is let through is our own overlay
-				// (where it selects the search box's content). Match BOTH the
-				// physical key (event.code — layout-independent, works on a
-				// Russian layout where F reports "ф") and the letter itself
-				// (some synthesizers deliver key="f" with a bogus code).
-				const keyLetter = event.key.toLowerCase();
-				if ((event.ctrlKey || event.metaKey) && (event.code === "KeyF" || keyLetter === "f" || keyLetter === "ф")) {
+				// (where it selects the search box's content).
+				//
+				// Matched by PHYSICAL key (event.code) ONLY — never by the
+				// reported letter. A Cyrillic letter must not trigger anything:
+				// on the Russian layout "ф" sits on the PHYSICAL A key, so
+				// Ctrl+Ф is Ctrl+A ("select all"), and physical F reports "а".
+				// event.code is layout-independent and always unambiguous.
+				if ((event.ctrlKey || event.metaKey) && event.code === "KeyF") {
 					if (overlayFocused) return;
 					event.preventDefault();
 					event.stopPropagation();
@@ -2335,9 +2337,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						} else {
 							explorerStore.setTab("files");
 						}
-					// Ctrl/Cmd+R reload: physical key OR the letter (Russian
-					// layout reports "к" for the R key).
-					} else if ((event.ctrlKey || event.metaKey) && (event.code === "KeyR" || event.key.toLowerCase() === "r" || event.key.toLowerCase() === "к")) {
+					// Ctrl/Cmd+R reload: physical key only (a Cyrillic letter
+					// would alias a DIFFERENT physical key's shortcut).
+					} else if ((event.ctrlKey || event.metaKey) && event.code === "KeyR") {
 						event.preventDefault();
 						reloadPreview();
 					}
