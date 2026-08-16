@@ -562,8 +562,13 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				"box-shadow:0 6px 24px rgba(0,0,0,.28);font-size:13px;font-family:var(--dsw-font-family)";
 			const styleEl = document.createElement("style");
 			styleEl.textContent =
-				"mark.dshd-chat-mark{background:var(--dsw-alias-state-warn-primary,#e8a13a);color:#000;border-radius:2px;padding:0 1px}" +
-				"mark.dshd-chat-mark.dshd-chat-current{outline:2px solid var(--dsw-alias-state-info-primary,#4f6ef7)}" +
+				// Marks are overlays painted OVER the message text, so the fill
+				// must stay translucent — the highlighted words stay readable
+				// underneath (the app itself uses color-mix for such tints).
+				"mark.dshd-chat-mark{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary,#e8a13a) 32%, transparent);" +
+				"color:inherit;border-radius:2px;padding:0 1px}" +
+				"mark.dshd-chat-mark.dshd-chat-current{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary,#e8a13a) 55%, transparent);" +
+				"outline:2px solid var(--dsw-alias-state-info-primary,#4f6ef7)}" +
 				"#dshd-chat-search input{flex:1;min-width:180px;background:transparent;border:1px solid var(--dsw-alias-border-l2);" +
 				"border-radius:6px;color:var(--dsw-alias-label-primary);padding:4px 8px;font:inherit;outline:none}" +
 				"#dshd-chat-search input:focus{border-color:var(--dsw-alias-border-l3)}" +
@@ -713,8 +718,11 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 					const el = document.createElement("mark");
 					el.className = "dshd-chat-mark";
 					el.style.cssText =
+						// No background here: the translucent fill comes from the
+						// .dshd-chat-mark class rule (an opaque inline fill would
+						// bury the text under the overlay).
 						"position:fixed;pointer-events:none;z-index:90000;display:none;" +
-						"background:var(--dsw-alias-state-warn-primary,#e8a13a);border-radius:2px;margin:0;padding:0";
+						"border-radius:2px;margin:0;padding:0";
 					document.body.appendChild(el);
 					matches.push({ range, el });
 				}
@@ -828,8 +836,12 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				// Cmd/Ctrl+F → open chat search. The native webview has no
 				// find bar, so this hijacks the shortcut even inside inputs:
 				// the only place Ctrl+F is let through is our own overlay
-				// (where it selects the search box's content).
-				if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+				// (where it selects the search box's content). Match BOTH the
+				// physical key (event.code — layout-independent, works on a
+				// Russian layout where F reports "ф") and the letter itself
+				// (some synthesizers deliver key="f" with a bogus code).
+				const keyLetter = event.key.toLowerCase();
+				if ((event.ctrlKey || event.metaKey) && (event.code === "KeyF" || keyLetter === "f" || keyLetter === "ф")) {
 					if (overlayFocused) return;
 					event.preventDefault();
 					event.stopPropagation();
@@ -2249,7 +2261,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						} else {
 							explorerStore.setTab("files");
 						}
-					} else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r") {
+					// Ctrl/Cmd+R reload: physical key OR the letter (Russian
+					// layout reports "к" for the R key).
+					} else if ((event.ctrlKey || event.metaKey) && (event.code === "KeyR" || event.key.toLowerCase() === "r" || event.key.toLowerCase() === "к")) {
 						event.preventDefault();
 						reloadPreview();
 					}
