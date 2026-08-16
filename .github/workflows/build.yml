@@ -106,5 +106,18 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          # Only the real deliverables: installers, update tarballs and their
+          # checksums. The build artifact also carries bundle staging files
+          # (icon.icns, Info.plist, control, data.tar.gz, …) whose names
+          # collide across platforms; publishing them trips softprops' asset
+          # label update (duplicate names → "Not Found") and litters the
+          # release page with internals.
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.AppImage
+            artifacts/**/dsh-desktop-*.tar.gz
+            artifacts/**/dsh-desktop-*.sha256
           generate_release_notes: true
