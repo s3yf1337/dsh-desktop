@@ -29,6 +29,7 @@ fn main() {
 				"desktop_search_names",
 				"desktop_update_now",
 				"desktop_install_info",
+				"desktop_clipboard_image",
 			]),
 		),
 	)

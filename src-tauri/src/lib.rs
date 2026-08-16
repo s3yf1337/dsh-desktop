@@ -286,6 +286,7 @@ fn run_window(raw: String) -> i32 {
 			commands::desktop_set_title,
 			commands::desktop_update_now,
 			commands::desktop_install_info,
+			commands::desktop_clipboard_image,
 			fs::desktop_list_dir,
 			fs::desktop_parent_dir,
 			fs::desktop_read_file,

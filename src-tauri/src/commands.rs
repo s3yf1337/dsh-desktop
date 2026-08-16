@@ -202,3 +202,46 @@ pub fn desktop_set_title(app: AppHandle, title: String) -> Result<(), String> {
 	let _ = app.emit(crate::update::TITLE_EVENT, title);
 	Ok(())
 }
+
+/// A clipboard image snapshot handed to the webview: PNG bytes as base64.
+#[derive(serde::Serialize)]
+pub struct ClipboardImage {
+	pub mime: String,
+	pub content: String,
+}
+
+/// Read the current system clipboard as an image, if it holds one.
+///
+/// The webview cannot attach clipboard images through DOM paste events —
+/// WebKitGTK exposes no `clipboardData` file items for them — so the shell
+/// reads the clipboard natively and returns a PNG (base64). `Ok(None)` when
+/// the clipboard holds text or nothing (the caller then falls back to the
+/// browser's own text-paste handling).
+#[tauri::command]
+pub fn desktop_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+	let mut clipboard = arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
+	let image = match clipboard.get_image() {
+		Ok(image) => image,
+		Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+		Err(error) => return Err(format!("clipboard read failed: {error}")),
+	};
+	// The clipboard image is RGBA8; the webview needs a real image format, so
+	// encode it as PNG (small, lossless, universal).
+	let mut out = Vec::new();
+	{
+		let mut encoder = png::Encoder::new(&mut out, image.width as u32, image.height as u32);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		let mut writer = encoder
+			.write_header()
+			.map_err(|error| format!("png header: {error}"))?;
+		writer
+			.write_image_data(&image.bytes)
+			.map_err(|error| format!("png write: {error}"))?;
+	}
+	use base64::Engine as _;
+	Ok(Some(ClipboardImage {
+		mime: "image/png".to_string(),
+		content: base64::engine::general_purpose::STANDARD.encode(&out),
+	}))
+}

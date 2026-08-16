@@ -46,6 +46,7 @@
     "allow-desktop-copy",
     "allow-desktop-move",
     "allow-desktop-open-path",
-    "allow-desktop-search-names"
+    "allow-desktop-search-names",
+    "allow-desktop-clipboard-image"
   ]
 }

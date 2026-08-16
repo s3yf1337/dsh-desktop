@@ -562,13 +562,14 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				"box-shadow:0 6px 24px rgba(0,0,0,.28);font-size:13px;font-family:var(--dsw-font-family)";
 			const styleEl = document.createElement("style");
 			styleEl.textContent =
-				// Marks are overlays painted OVER the message text, so the fill
-				// must stay translucent — the highlighted words stay readable
-				// underneath (the app itself uses color-mix for such tints).
-				"mark.dshd-chat-mark{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary,#e8a13a) 32%, transparent);" +
-				"color:inherit;border-radius:2px;padding:0 1px}" +
-				"mark.dshd-chat-mark.dshd-chat-current{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary,#e8a13a) 55%, transparent);" +
-				"outline:2px solid var(--dsw-alias-state-info-primary,#4f6ef7)}" +
+				// Marks are overlays painted OVER the message text: a subtle
+				// translucent accent (the app's info blue, not a loud yellow)
+				// keeps the highlighted words readable underneath. The current
+				// match is slightly stronger and outlined.
+				"mark.dshd-chat-mark{background:color-mix(in srgb, var(--dsw-alias-state-info-primary,#4f6ef7) 26%, transparent);" +
+				"color:inherit;border-radius:3px;padding:0}" +
+				"mark.dshd-chat-mark.dshd-chat-current{background:color-mix(in srgb, var(--dsw-alias-state-info-primary,#4f6ef7) 45%, transparent);" +
+				"outline:1.5px solid var(--dsw-alias-state-info-primary,#4f6ef7)}" +
 				"#dshd-chat-search input{flex:1;min-width:180px;background:transparent;border:1px solid var(--dsw-alias-border-l2);" +
 				"border-radius:6px;color:var(--dsw-alias-label-primary);padding:4px 8px;font:inherit;outline:none}" +
 				"#dshd-chat-search input:focus{border-color:var(--dsw-alias-border-l3)}" +
@@ -642,13 +643,13 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						continue;
 					}
 					match.el.style.display = "block";
-					// Glyph ink can slightly overflow the range rect (kerning,
-					// antialiasing) — pad a little so the mark fully covers the
-					// matched word instead of slicing its last letters.
-					match.el.style.left = `${rect.left - 2}px`;
-					match.el.style.top = `${rect.top - 1}px`;
-					match.el.style.width = `${Math.max(rect.width + 4, 2)}px`;
-					match.el.style.height = `${rect.height + 2}px`;
+					// The highlight hugs the text exactly: the range rect is the
+					// text's own advance box, with only a 1px right cushion for
+					// glyph ink that slightly overflows (kerning, italics).
+					match.el.style.left = `${rect.left}px`;
+					match.el.style.top = `${rect.top}px`;
+					match.el.style.width = `${Math.max(rect.width + 1, 2)}px`;
+					match.el.style.height = `${rect.height}px`;
 				}
 			}
 
@@ -1161,12 +1162,24 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			return bytes;
 		}
 
-		/** Read an image natively and add it to the active session's draft
-		* images. Returns false when no composer or readable image exists. */
-		async function attachImageToComposer(sessions, conversation, path, name) {
+		/** Add already-materialized image Files to the active session's draft
+		* images. Returns false when no composer accepts them. Shared by the
+		* file-panel attach, the drag-drop path and clipboard paste. */
+		function attachImageFilesToComposer(sessions, conversation, files) {
 			if (!conversation || typeof conversation.createDraftImages !== "function") return false;
 			const session = composerSession(sessions);
 			if (!session) return false;
+			try {
+				const ids = conversation.createDraftImages(files).map((attachment) => attachment.id);
+				return session.actions.addImages(ids);
+			} catch {
+				return false;
+			}
+		}
+
+		/** Read an image natively and add it to the active session's draft
+		* images. Returns false when no composer or readable image exists. */
+		async function attachImageToComposer(sessions, conversation, path, name) {
 			let content;
 			try {
 				content = await window.__TAURI__.core.invoke("desktop_read_file", { path });
@@ -1182,12 +1195,73 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			} catch {
 				return false;
 			}
-			try {
-				const ids = conversation.createDraftImages([file]).map((attachment) => attachment.id);
-				return session.actions.addImages(ids);
-			} catch {
-				return false;
-			}
+			return attachImageFilesToComposer(sessions, conversation, [file]);
+		}
+
+		/** Clipboard image paste. WebKitGTK exposes NO clipboard image items
+		* through DOM paste events, so the SPA's own paste handler never sees
+		* them. This listener (capture, installed once, native only) attaches
+		* images from two sources: the clipboardData file items when the
+		* webview does expose them, and a native clipboard read
+		* (`desktop_clipboard_image`) otherwise. Text paste is never touched —
+		* the SPA keeps handling it. */
+		function installClipboardPaste(ctx) {
+			if (!hasTauri() || typeof document === "undefined") return;
+			if (installClipboardPaste.installed) return;
+			installClipboardPaste.installed = true;
+
+			document.addEventListener(
+				"paste",
+				(event) => {
+					try {
+						const data = event.clipboardData;
+						if (!data) return;
+						const imageFiles = Array.from(data.items || [])
+							.filter((item) => item.kind === "file" && /^image\//i.test(item.type || ""))
+							.map((item) => {
+								try {
+									return item.getAsFile();
+								} catch {
+									return null;
+								}
+							})
+							.filter((file) => file !== null);
+						if (imageFiles.length > 0) {
+							// The webview exposed the image: attach it now and
+							// swallow the event so the SPA's own (blind) paste
+							// handling does not run on top.
+							event.preventDefault();
+							event.stopPropagation();
+							if (!attachImageFilesToComposer(ctx.sessions, ctx.conversation, imageFiles)) {
+								console.error("dsh-desktop: cannot attach pasted image (no active composer?)");
+							}
+							return;
+						}
+						// No DOM image items — ask the shell to read the system
+						// clipboard natively. Text paste is left alone entirely
+						// (the SPA handles it); if the clipboard holds an image
+						// it lands in the composer as an attachment.
+						window.__TAURI__.core
+							.invoke("desktop_clipboard_image")
+							.then((snapshot) => {
+								if (!snapshot || typeof snapshot.content !== "string" || snapshot.content === "") return;
+								const bytes = base64ToBytes(snapshot.content);
+								if (bytes === null) return;
+								let file;
+								try {
+									file = new File([bytes], "clipboard.png", { type: snapshot.mime || "image/png" });
+								} catch {
+									return;
+								}
+								attachImageFilesToComposer(ctx.sessions, ctx.conversation, [file]);
+							})
+							.catch((caught) => console.error("dsh-desktop: clipboard image read failed:", errText(caught)));
+					} catch (caught) {
+						console.error("dsh-desktop: paste handler failed:", errText(caught));
+					}
+				},
+				true
+			);
 		}
 
 		// ── preview enhancements: source highlighting, mermaid, CSV ─────────
@@ -4184,6 +4258,8 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			if (hasTauri() && typeof document !== "undefined") installChatSearch();
 			// Mermaid + CSV rendered inside live chat answers (native only).
 			if (hasTauri() && typeof document !== "undefined") installAnswerDiagrams();
+			// Clipboard image paste → composer attachment (native only).
+			if (hasTauri() && typeof document !== "undefined") installClipboardPaste(ctx);
 
 			// Native file/folder integration: dropping a directory onto the
 			// window opens it as a workspace; dropping image files attaches
