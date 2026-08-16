@@ -490,20 +490,23 @@ fn run_window(raw: String) -> i32 {
 						Ok((pos, size))
 					})
 					.map(|(pos, size)| {
-						let x0 = pos.x;
-						let y0 = pos.y;
-						let x1 = pos.x + size.width as i32;
-						let y1 = pos.y + size.height as i32;
+						// Do the edge math in i64 so a restored position/size
+						// near i32::MAX can't wrap the sums negative and defeat
+						// the overlap test.
+						let x0 = pos.x as i64;
+						let y0 = pos.y as i64;
+						let x1 = x0 + size.width as i64;
+						let y1 = y0 + size.height as i64;
 						app_handle
 							.available_monitors()
 							.map(|monitors| {
 								monitors.iter().any(|m| {
 									let p = m.position();
 									let s = m.size();
-									let mx0 = p.x;
-									let my0 = p.y;
-									let mx1 = p.x + s.width as i32;
-									let my1 = p.y + s.height as i32;
+									let mx0 = p.x as i64;
+									let my0 = p.y as i64;
+									let mx1 = mx0 + s.width as i64;
+									let my1 = my0 + s.height as i64;
 									x0 < mx1 && x1 > mx0 && y0 < my1 && y1 > my0
 								})
 							})

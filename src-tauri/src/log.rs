@@ -32,7 +32,7 @@ fn write(app: &AppHandle, level: &str, message: &str) {
 	let stamp = crate::settings::now_rfc3339();
 	let text = format!("{stamp} [{level}] {message}");
 	eprintln!("dsh-desktop: {text}");
-	let config_dir = app.state::<AppState>().config_dir.lock().unwrap().clone();
+	let config_dir = app.state::<AppState>().config_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	append(&config_dir, &text);
 }
 

@@ -109,7 +109,7 @@ pub async fn periodic_loop(app: AppHandle) {
 		let (enabled, interval) = {
 			let state = app.state::<AppState>();
 			let settings = state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-			(settings.auto_update_check, settings.update_interval_hours.max(1))
+			(settings.auto_update_check, settings.update_interval_hours.clamp(1, 720))
 		};
 		if enabled {
 			// Skip this cycle while a one-click update is being applied in
@@ -118,7 +118,7 @@ pub async fn periodic_loop(app: AppHandle) {
 				run_check(&app, false).await;
 			}
 		}
-		tokio::time::sleep(Duration::from_secs(interval * 3600)).await;
+		tokio::time::sleep(Duration::from_secs(interval.saturating_mul(3600))).await;
 	}
 }
 
@@ -357,12 +357,15 @@ async fn apply_tarball_unix(
 		}
 	}
 
-	// Refresh the plugin bundle inside the profile *before* the final swap;
-	// the bundle refresh is the part with no local backup.
-	crate::install::refresh_profile_bundle_from(new_bundle)?;
-
-	// Atomic swap.
+	// Atomic swap of the validated binary before touching the bundle: a failed
+	// rename strands neither a half-mounted new file nor a new bundle under a
+	// still-old binary.
 	std::fs::rename(&tmp, current).map_err(|e| format!("cannot swap new client into place: {e}"))?;
+
+	// Refresh the plugin bundle afterwards. If this fails the result is the
+	// safe direction (new binary + old bundle); an old bundle never calls the
+	// commands a new binary lacks.
+	crate::install::refresh_profile_bundle_from(new_bundle)?;
 
 	let version = std::process::Command::new(current)
 		.arg("--version")
@@ -386,10 +389,11 @@ async fn apply_tarball_windows(
 ) -> Result<String, String> {
 	// Windows: a running exe cannot be overwritten, so the current binary is
 	// renamed aside to `.old` (with retries for the briefly-locked file), then
-	// the new one is copied into place. `.old` is only deleted after the whole
-	// apply has succeeded, so a failed bundle refresh can be rolled back.
-	// A stale `.old` left by a *previous* interrupted apply is dropped first
-	// (best-effort) so it can't block this apply's rename.
+	// the new one is brought into place. As with the Unix path, validate the
+	// downloaded binary *first* (on a staged copy) so a broken release never
+	// gets swapped in; only once the swap happens do we consider deleting the
+	// `.old` rollback. A stale `.old` left by a *previous* interrupted apply is
+	// dropped up front (best-effort) so it can't block this apply's rename.
 	let _ = std::fs::remove_file(old);
 	let mut renamed = false;
 	for _ in 0..10 {
@@ -404,12 +408,25 @@ async fn apply_tarball_windows(
 	if !renamed {
 		return Err("cannot replace the running client (Windows locked it)".into());
 	}
-	if let Err(e) = std::fs::copy(new_binary, current) {
-		// Best-effort rollback of the swap before returning.
+
+	// Stage the new binary beside `.old` and validate it before it becomes the
+	// live client. If anything here fails, the current binary is still intact
+	// and we restore it.
+	let code = (|| -> Result<(), String> {
+		std::fs::copy(new_binary, current).map_err(|e| format!("cannot copy new client into place: {e}"))?;
+		// Windows executables don't carry the Unix mode bit; nothing to chmod.
+		// Version sanity: the staged binary must answer `--version` itself.
+		let status = std::process::Command::new(current).arg("--version").status();
+		if !status.map(|s| s.success()).unwrap_or(false) {
+			return Err("new client failed its --version check".to_string());
+		}
+		Ok(())
+	})();
+	if let Err(e) = code {
+		let _ = std::fs::remove_file(current);
 		let _ = std::fs::rename(old, current);
 		return Err(format!("cannot install new client (rolled back): {e}"));
 	}
-	// Windows executables don't carry the Unix mode bit; nothing to chmod.
 
 	// Refresh the plugin bundle inside the profile from the *new* bundle/.
 	if let Err(e) = crate::install::refresh_profile_bundle_from(new_bundle) {
@@ -420,7 +437,15 @@ async fn apply_tarball_windows(
 		return Err(format!("cannot refresh bundle, rolled back client: {e}"));
 	}
 
-	// Version sanity: the new binary reports its own version on `--version`.
+	// Re-verify the swapped-in binary before discarding the backup.
+	let status = std::process::Command::new(current).arg("--version").status();
+	if !status.map(|s| s.success()).unwrap_or(false) {
+		// Fall back to the known-good `.old` rather than leaving a broken exe
+		// in place with no rollback.
+		let _ = std::fs::remove_file(current);
+		let _ = std::fs::rename(old, current);
+		return Err("installed client failed post-swap --version check, restored .old".to_string());
+	}
 	let version = std::process::Command::new(current)
 		.arg("--version")
 		.output()

@@ -478,8 +478,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			// NON-http scheme (file:, data:, vbscript:, blob:, javascript:)
 			// must never reach the OS opener — leave those to the webview
 			// default (which is to do nothing).
-			const EXTERNAL_SCHEME = /^(https?:|mailto:)/i;
-			const DANGEROUS_SCHEME = /^(javascript:|data:|file:|vbscript:|blob:)/i;
+			// A `target="_blank"` or `rel=external` hint alone no longer widens
+			// what can be opened: only the trimmed href that PARSES to an
+			// absolute http(s)/mailto URL may reach the OS opener.
 			document.addEventListener(
 				"click",
 				(event) => {
@@ -489,19 +490,30 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
 						const anchor = event.target && typeof event.target.closest === "function" ? event.target.closest("a[href]") : null;
 						if (!anchor) return;
-						const href = anchor.getAttribute("href") || "";
+						const href = (anchor.getAttribute("href") || "").trim();
 						const hinted = anchor.target === "_blank" || (anchor.rel || "").split(/\s+/).includes("external");
-						// External = a safe absolute scheme, or a hinted anchor
-						// whose href is neither dangerous nor relative (a bare
-						// host like "example.com" still routes to the browser).
-						const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
-						const external = EXTERNAL_SCHEME.test(href) || (hinted && !DANGEROUS_SCHEME.test(href) && !hasScheme);
+						// External only when the trimmed value parses to an
+						// absolute http(s)/mailto URL. Anything that fails to
+						// parse (relative, bare host) or parses to another
+						// scheme (javascript:, data:, file:, …) is left alone —
+						// even with a `target="_blank"` hint, and a bare host no
+						// longer routes to the browser.
+						let parsed = null;
+						try {
+							parsed = new URL(href);
+						} catch {
+							parsed = null;
+						}
+						const extScheme = parsed !== null && (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:");
+						// Keep the hint logic but scope it to the parsed http(s)/
+						// mailto value only — it can never broaden past that.
+						const external = extScheme || (hinted && extScheme);
 						if (!external) return;
 						event.preventDefault();
 						event.stopPropagation();
 						window.__TAURI__.core
-							.invoke("desktop_open_path", { path: href })
-							.catch((caught) => console.error(`dsh-desktop: cannot open ${href}:`, errText(caught)));
+							.invoke("desktop_open_path", { path: parsed.href })
+							.catch((caught) => console.error(`dsh-desktop: cannot open ${parsed.href}:`, errText(caught)));
 					} catch (caught) {
 						console.error("dsh-desktop: external-link handler failed:", errText(caught));
 					}
@@ -1038,20 +1050,52 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				return `![${alt}](${dshdFileUrl(abs)}${rest ?? ""})`;
 			};
 			const imageRe = /!\[([^\]]*)\]\(\s*([^)\s]+)((?:\s+[^)]*)?)\)/g;
+			// True when the image match spanning [from, to) on `line` sits
+			// inside a backtick code span: an odd number of backticks before it
+			// (we are inside a span), or a backtick pair that encloses it.
+			const inBacktickSpan = (line, from, to) => {
+				let before = 0;
+				let idx = line.indexOf("`");
+				while (idx !== -1 && idx < from) {
+					before++;
+					idx = line.indexOf("`", idx + 1);
+				}
+				if (before % 2 === 1) return true;
+				return line.lastIndexOf("`", from - 1) !== -1 && line.indexOf("`", to) !== -1;
+			};
 			let fence = null;
 			return String(markdown).split("\n").map((line) => {
 				const trimmed = line.trim();
-				const open = /^(`{3,}|~{3,})/.exec(trimmed);
-				if (fence === null) {
-					if (open) {
-						fence = open[1][0];
-						return line;
-					}
-					return line.replace(imageRe, rewrite);
+				if (fence !== null) {
+					// Inside a fence: a same-char marker run of 3+ closes it.
+					if (new RegExp(`^\\${fence}{3,}\\s*$`).test(trimmed)) fence = null;
+					return line;
 				}
-				// Inside a fence: a same-char marker run of 3+ closes it.
-				if (new RegExp(`^\\${fence}{3,}\\s*$`).test(trimmed)) fence = null;
-				return line;
+				const open = /^(`{3,}|~{3,})/.exec(trimmed);
+				if (open) {
+					fence = open[1][0];
+					return line;
+				}
+				// Indented (4+ spaces or a tab) code line: code is shown
+				// verbatim, so never rewrite an image link in it.
+				if (/^( {4,}|\t)/.test(line)) return line;
+				// Fast path: nothing to rewrite.
+				if (line.indexOf("!") === -1) return line;
+				// Rewrite image links, skipping any that sit inside a backtick
+				// code span on this line.
+				let output = "";
+				let lastIndex = 0;
+				let m;
+				imageRe.lastIndex = 0;
+				while ((m = imageRe.exec(line)) !== null) {
+					if (inBacktickSpan(line, m.index, m.index + m[0].length)) {
+						output += line.slice(lastIndex, m.index + m[0].length);
+					} else {
+						output += line.slice(lastIndex, m.index) + rewrite(m[0], m[1], m[2], m[3]);
+					}
+					lastIndex = m.index + m[0].length;
+				}
+				return output + line.slice(lastIndex);
 			}).join("\n");
 		}
 
@@ -1229,20 +1273,40 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 							})
 							.filter((file) => file !== null);
 						if (imageFiles.length > 0) {
-							// The webview exposed the image: attach it now and
-							// swallow the event so the SPA's own (blind) paste
-							// handling does not run on top.
-							event.preventDefault();
-							event.stopPropagation();
-							if (!attachImageFilesToComposer(ctx.sessions, ctx.conversation, imageFiles)) {
+							// The webview exposed the image: attach it first, and
+							// only swallow the event if the attachment landed. If
+							// no composer is open, attachment fails — do NOT
+							// preventDefault, so the SPA's own paste handling
+							// still runs and the image is not silently lost.
+							if (attachImageFilesToComposer(ctx.sessions, ctx.conversation, imageFiles)) {
+								event.preventDefault();
+								event.stopPropagation();
+							} else {
 								console.error("dsh-desktop: cannot attach pasted image (no active composer?)");
 							}
 							return;
 						}
+						// Plain-text paste: the clipboard holds text, not an
+						// image — skip the native read entirely. The SPA keeps
+						// handling text paste, and skipping avoids a pointless
+						// IPC round-trip on every text paste (which is also what
+						// spams console errors when the shell binary predates
+						// this command). A paste whose data carries no text
+						// (or an image/* type) still goes through the native
+						// read, so image paste keeps working.
+						let pastedText = "";
+						try {
+							pastedText = data.getData ? data.getData("text/plain") || "" : "";
+						} catch {
+							pastedText = "";
+						}
+						const hasImageType = Array.from(data.types || []).some((type) => /^image\//i.test(String(type)));
+						if (!hasImageType && pastedText !== "") {
+							return;
+						}
 						// No DOM image items — ask the shell to read the system
-						// clipboard natively. Text paste is left alone entirely
-						// (the SPA handles it); if the clipboard holds an image
-						// it lands in the composer as an attachment.
+						// clipboard natively. If the clipboard holds an image it
+						// lands in the composer as an attachment.
 						window.__TAURI__.core
 							.invoke("desktop_clipboard_image")
 							.then((snapshot) => {
@@ -1257,7 +1321,22 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 								}
 								attachImageFilesToComposer(ctx.sessions, ctx.conversation, [file]);
 							})
-							.catch((caught) => console.error("dsh-desktop: clipboard image read failed:", errText(caught)));
+							.catch((caught) => {
+								// Shell builds that predate this command reject it
+								// with an ACL/not-found error. That is a missing
+								// feature, not a paste failure — text paste must
+								// keep working — so report it once, quietly,
+								// instead of erroring on every paste.
+								const error = errText(caught);
+								if (/not allowed by ACL|not found|unknown command/i.test(error)) {
+									if (!installClipboardPaste.nativeUnavailable) {
+										installClipboardPaste.nativeUnavailable = true;
+										console.warn("dsh-desktop: native clipboard image paste unavailable (the shell binary is out of date):", error);
+									}
+									return;
+								}
+								console.error("dsh-desktop: clipboard image read failed:", error);
+							});
 					} catch (caught) {
 						console.error("dsh-desktop: paste handler failed:", errText(caught));
 					}
@@ -2266,8 +2345,19 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				const onMessage = (event) => {
 					const data = event.data;
 					if (!data || data.source !== "dshd-file") return;
+					// Only trust bridge messages from the local preview route,
+					// which is served from this same harness origin. Cross-origin
+					// frames (e.g. the arbitrary URL-preview iframe) get an opaque
+					// origin here, so a remote page can never drive the OS opener
+					// by faking `source: "dshd-file"`.
+					if (event.origin !== location.origin) return;
 					if (data.type === "open" && typeof data.url === "string") {
-						run("desktop_open_path", { path: data.url });
+						// Re-validate the scheme on the panel side before shelling
+						// out: only http/https/mailto reach the system opener.
+						const url = data.url.trim();
+						if (/^(https?:|mailto:)/i.test(url)) {
+							run("desktop_open_path", { path: url });
+						}
 					} else if (data.type === "title" && typeof data.title === "string") {
 						setWebTitle(data.title);
 					}
@@ -2410,7 +2500,9 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				try {
 					await window.__TAURI__.core.invoke("desktop_rename", { path: renaming.path, newName: name });
 					setRenaming(null);
-					loadDir(cwd);
+					// Reload the CURRENT directory, not the one captured when the
+					// rename was started — the user may have navigated since.
+					loadDir(cwdRef.current);
 				} catch (caught) {
 					setError(errText(caught));
 				}
@@ -2431,7 +2523,8 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 						await window.__TAURI__.core.invoke("desktop_write_file", { path, content: "" });
 					}
 					setCreating(null);
-					loadDir(cwd);
+					// Reload the current directory (see commitRenameValue).
+					loadDir(cwdRef.current);
 				} catch (caught) {
 					setError(errText(caught));
 				}
@@ -2444,7 +2537,8 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 				try {
 					await window.__TAURI__.core.invoke("desktop_delete", { path: entry.path });
 					if (selected === entry.path) setSelected(null);
-					loadDir(cwd);
+					// Reload the current directory (see commitRenameValue).
+					loadDir(cwdRef.current);
 				} catch (caught) {
 					setError(errText(caught));
 				}
@@ -3114,10 +3208,15 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 								onClick: () => run("desktop_open_path", { path: current.url })
 							}, "Open in browser")),
 						h("div", { style: { flex: 1, minHeight: 0, position: "relative" } },
+							// Opaque origin (no allow-same-origin: the remote page
+							// gets no cookies/storage and a null origin) and no
+							// allow-popups (a hostile page cannot open phishing
+							// windows on top of the app). Sites that refuse to
+							// embed may use the "Open in browser" button above.
 							h("iframe", {
 								key: webRev,
 								src: current.url,
-								sandbox: "allow-scripts allow-forms allow-popups allow-same-origin",
+								sandbox: "allow-scripts allow-forms",
 								referrerPolicy: "no-referrer",
 								style: { position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "#fff" },
 								onLoad: () => setWebBusy(false)
@@ -4228,7 +4327,21 @@ body.dshd-resizing{user-select:none;cursor:col-resize}
 			}
 
 			try {
-				const observer = new MutationObserver(() => schedule(scan));
+				// Re-entrancy/throttle guard: drop immediately-repeated scans and
+				// skip entirely while the document is hidden. The observer still
+				// stays connected for the whole session so late-rendered answers
+				// are always detected; scan() work is just kept cheap.
+				let lastScanAt = 0;
+				const onBodyMutation = () => {
+					if (typeof document !== "undefined" && document.hidden) return;
+					const now = Date.now();
+					if (now - lastScanAt < 250) return;
+					schedule(() => {
+						lastScanAt = Date.now();
+						scan();
+					});
+				};
+				const observer = new MutationObserver(onBodyMutation);
 				// characterData matters: the final chunk of a streamed fence often
 				// lands as an in-place text update, not a childList change — a
 				// scan that only fires on childList would leave the last partial

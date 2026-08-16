@@ -237,7 +237,10 @@ bundle/                  the dsh-desktop-shell plugin package (bundle contract)
                          preview panel — markdown images, .html pages, assets)
   lib/client.js          browser half: title bar, explorer panel (markdown /
                          web / image / hexdump previews), settings tab
-dist/index.html          loading page shown while the WebView boots
+dist/                    repo-root tauri frontendDist: dist/index.html loading
+                         page the WebView shows while it boots. Build-time/CI
+                         only — not part of the install.sh bundle, which ships
+                         bundle/ (lib/ + cordis.patch.yml), not dist/.
 dsh-desktop              launcher wrapper: exec dsh --profile desktop
 install.sh               one-command bootstrap (profile + client + icons + menu entry)
 src-tauri/               the native render client (the actual app)

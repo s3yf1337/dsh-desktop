@@ -72,10 +72,16 @@ pub struct DesktopState {
 /// read/parse failure — settings are disposable).
 pub fn load(config_dir: &PathBuf) -> DesktopSettings {
 	let path = config_dir.join("dsh-desktop.json");
-	match fs::read_to_string(&path) {
+	let mut settings = match fs::read_to_string(&path) {
 		Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
 		Err(_) => DesktopSettings::default(),
-	}
+	};
+	// Re-clamp the persisted interval on load: a value written by an older or
+	// hand-edited settings file can be huge, and an unclamped multiply in
+	// periodic_loop would overflow/underflow into a tiny sleep that hammers
+	// the GitHub API. Mirrors the clamp desktop_set_setting applies.
+	settings.update_interval_hours = settings.update_interval_hours.clamp(1, 720);
+	settings
 }
 
 /// Persist settings, creating the config directory when needed. Failures are

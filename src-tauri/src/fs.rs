@@ -270,7 +270,21 @@ pub fn desktop_create_dir(path: String) -> Result<(), String> {
 /// Rename a file or directory inside its own parent (a same-dir move).
 #[tauri::command]
 pub fn desktop_rename(path: String, new_name: String) -> Result<(), String> {
-	if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains('/') || new_name.contains('\\') {
+	// Reject dot names, separators, and (always) a colon: ':' is not a valid
+	// filename character on Windows (it would enable a drive/path escape or an
+	// NTFS alternate data stream like `file:stream`), and is unusual elsewhere.
+	if new_name.is_empty()
+		|| new_name == "."
+		|| new_name == ".."
+		|| new_name.contains('/')
+		|| new_name.contains('\\')
+		|| new_name.contains(':')
+	{
+		return Err("invalid name".into());
+	}
+	// Defence-in-depth: the final name must be a single path component. This
+	// catches any separator or drive-root tricks the character checks miss.
+	if std::path::Path::new(&new_name).components().count() != 1 {
 		return Err("invalid name".into());
 	}
 	let source = std::path::PathBuf::from(&path);
@@ -298,6 +312,9 @@ pub fn desktop_copy(src: String, dest_dir: String) -> Result<(), String> {
 		.to_string_lossy()
 		.into_owned();
 	let target = std::path::PathBuf::from(&dest_dir).join(&name);
+	if paths_overlap(&source, &target) {
+		return Err(format!("cannot copy {src}: destination is inside the source"));
+	}
 	copy_tree(&source, &target).map_err(|error| format!("cannot copy {src}: {error}"))
 }
 
@@ -315,7 +332,18 @@ pub fn desktop_move(src: String, dest_dir: String) -> Result<(), String> {
 	if std::fs::rename(&source, &target).is_ok() {
 		return Ok(());
 	}
-	// Cross-device (EXDEV) or any other rename failure: copy, then remove.
+	// Never replace an existing destination: the copy+remove fallback below
+	// would otherwise silently wipe the pre-existing target's contents.
+	if target.exists() {
+		return Err(format!("cannot move {src}: destination already exists"));
+	}
+	// Defence-in-depth against copying the source into itself (which would
+	// recurse forever and balloon disk usage).
+	if paths_overlap(&source, &target) {
+		return Err(format!("cannot move {src}: destination is inside the source"));
+	}
+	// Likely cross-device (EXDEV): the target does not exist and is outside the
+	// source, so copy, then remove the source.
 	copy_tree(&source, &target).map_err(|error| format!("cannot move {src}: {error}"))?;
 	remove_tree(&source).map_err(|error| format!("cannot move {src}: copied but cannot remove the source: {error}"))
 }
@@ -345,6 +373,15 @@ pub fn desktop_search_names(root: String, query: String, max: Option<usize>) -> 
 
 /// Recursive copy (files and directories, following no symlinks).
 fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+	// Defence-in-depth: never copy a tree into itself or under itself. The
+	// caller guards too, but this makes every future caller safe from the
+	// unbounded self-copy recursion.
+	if paths_overlap(source, target) {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"destination is inside the source",
+		));
+	}
 	let meta = std::fs::symlink_metadata(source)?;
 	if meta.is_dir() {
 		if target.exists() {
@@ -372,6 +409,21 @@ fn remove_tree(path: &std::path::Path) -> std::io::Result<()> {
 	}
 }
 
+/// True when `target` resolves to `source` or to a path inside it. Used to
+/// stop copy/move from recursing into themselves. The source is canonicalized
+/// (it must exist for a copy/move); the target is canonicalized when possible,
+/// but since a fresh destination does not exist yet we fall back to a lexical
+/// containment check so a target about to be created under the source is still
+/// caught. Canonicalization failures other than a missing target are tolerated
+/// by skipping the check.
+fn paths_overlap(source: &std::path::Path, target: &std::path::Path) -> bool {
+	let Ok(s) = std::fs::canonicalize(source) else { return false };
+	if let Ok(t) = std::fs::canonicalize(target) {
+		return t == s || t.starts_with(&s);
+	}
+	target == s || target.starts_with(&s)
+}
+
 /// Bounded depth-first walk matching entry names (case-insensitive substring).
 fn walk_names(dir: &std::path::Path, needle: &str, depth: usize, max_depth: usize, max: usize, out: &mut Vec<FileEntry>) {
 	if depth > max_depth || out.len() >= max {
@@ -382,7 +434,10 @@ fn walk_names(dir: &std::path::Path, needle: &str, depth: usize, max_depth: usiz
 		if out.len() >= max {
 			return;
 		}
-		let Ok(meta) = entry.metadata() else { continue };
+		// symlink_metadata follows no symlinks, so a symlinked dir inside root
+		// is matched as an entry but never recursed into (results never escape
+		// root through a link).
+		let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
 		let name = entry.file_name().to_string_lossy().into_owned();
 		if name.to_lowercase().contains(needle) {
 			let modified = meta
@@ -424,7 +479,7 @@ mod tests {
 		let source = std::env::temp_dir()
 			.join(format!("dsh-desktop-rename-plugin-{}", std::process::id()));
 		std::fs::write(&source, b"x").unwrap();
-		for bad in ["", ".", "..", "a/b", "a\\b"] {
+		for bad in ["", ".", "..", "a/b", "a\\b", "a:b", "C:evil", "file:stream"] {
 			assert!(desktop_rename(source.to_string_lossy().into_owned(), bad.into()).is_err(), "expected reject for {bad:?}");
 		}
 		// A valid new name should still pass validation, so the guard only
@@ -494,6 +549,120 @@ mod tests {
 		assert!(out.truncated, "expected truncated for a file over the cap");
 		assert_eq!(out.text.lines().count() as u64, HEXDUMP_CAP / 16, "rows must match the cap");
 		rm(&path);
+	}
+
+	#[test]
+	fn move_does_not_replace_existing_destination() {
+		// BUG 1: moving onto a name that already exists must error out and leave
+		// the pre-existing destination contents intact (never wipe them).
+		let base = std::env::temp_dir().join(format!("dsh-desktop-move-dst-{}", std::process::id()));
+		// Source lives at base/src-name; a destination dir with the same
+		// basename ("src-name") already exists inside dest_dir.
+		let source = base.join("src-name");
+		let dest_dir = base.join("dest");
+		let existing_target = dest_dir.join("src-name");
+		let src_file = source.join("payload.txt");
+		let dst_file = existing_target.join("keep.txt");
+		std::fs::create_dir_all(&source).unwrap();
+		std::fs::create_dir_all(&existing_target).unwrap();
+		std::fs::write(&src_file, b"source").unwrap();
+		std::fs::write(&dst_file, b"original").unwrap();
+
+		// Move source into dest_dir: target = dest_dir/src-name, which exists.
+		let res = desktop_move(
+			source.to_string_lossy().into_owned(),
+			dest_dir.to_string_lossy().into_owned(),
+		);
+		assert!(res.is_err(), "move onto an existing destination should fail");
+		// The pre-existing target and its contents must be untouched.
+		assert!(dst_file.exists(), "existing destination content was destroyed");
+		assert_eq!(std::fs::read(&dst_file).unwrap(), b"original");
+		// The source must still be intact too (nothing was copied/removed).
+		assert!(src_file.exists());
+
+		let _ = std::fs::remove_dir_all(&base);
+	}
+
+	#[test]
+	fn copy_into_itself_is_rejected() {
+		// BUG 2: copying a directory into itself must error instead of recursing
+		// forever and ballooning disk usage.
+		let dir = std::env::temp_dir().join(format!("dsh-desktop-copy-self-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(dir.join("f.txt"), b"x").unwrap();
+		let res = desktop_copy(
+			dir.to_string_lossy().into_owned(),
+			dir.to_string_lossy().into_owned(),
+		);
+		assert!(res.is_err(), "copying a dir into itself should fail");
+
+		// copy_tree's own defence-in-depth guard fires too (no caller).
+		let inner = copy_tree(&dir, &dir.join("inner"));
+		assert!(inner.is_err(), "copy_tree of source under itself should fail");
+
+		// Nothing may have been created inside the source.
+		assert!(!dir.join("inner").exists());
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn move_into_itself_is_rejected() {
+		// BUG 2: moving a directory into itself must error (rename fails, and
+		// the copy fallback would self-copy recursively).
+		let dir = std::env::temp_dir().join(format!("dsh-desktop-move-self-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(dir.join("f.txt"), b"x").unwrap();
+		let res = desktop_move(
+			dir.to_string_lossy().into_owned(),
+			dir.to_string_lossy().into_owned(),
+		);
+		assert!(res.is_err(), "moving a dir into itself should fail");
+		assert!(dir.join("f.txt").exists(), "source must remain intact");
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn walk_names_does_not_descend_into_symlinked_dirs() {
+		// BUG 3: a symlink to a directory outside root must be matched as an
+		// entry but never recursed into (no results from outside root).
+		let base = std::env::temp_dir().join(format!("dsh-desktop-walk-link-{}", std::process::id()));
+		let root = base.join("root");
+		let outside = base.join("outside");
+		std::fs::create_dir_all(&root).unwrap();
+		std::fs::create_dir_all(&outside).unwrap();
+		// outside holds a file whose name only exists outside the root.
+		std::fs::write(outside.join("leaky-child.txt"), b"secret").unwrap();
+		let target_link = root.join("linked-dir");
+		#[cfg(unix)]
+		let link_ok = std::os::unix::fs::symlink(&outside, &target_link).is_ok();
+		#[cfg(windows)]
+		let link_ok = std::os::windows::fs::symlink_dir(&outside, &target_link).is_ok();
+		if !link_ok {
+			// The platform/environment cannot create symlinks (e.g. Windows
+			// without Developer Mode), so there is nothing to verify here.
+			let _ = std::fs::remove_dir_all(&base);
+			return;
+		}
+
+		// The symlink name itself is still discoverable and reported.
+		let found = desktop_search_names(
+			root.to_string_lossy().into_owned(),
+			"linked".into(),
+			Some(20),
+		)
+		.unwrap();
+		assert!(found.iter().any(|e| e.name == "linked-dir"), "symlink entry should be reported");
+
+		// But the symlink must never be descended: nothing from outside appears.
+		let found = desktop_search_names(
+			root.to_string_lossy().into_owned(),
+			"leaky".into(),
+			Some(20),
+		)
+		.unwrap();
+		assert!(found.is_empty(), "symlinked dir contents must not be searched");
+
+		let _ = std::fs::remove_dir_all(&base);
 	}
 }
 

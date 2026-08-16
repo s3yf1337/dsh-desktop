@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, normalize } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
@@ -169,6 +169,47 @@ async function serveDshdFile(req, res) {
 		res.end();
 		return;
 	}
+	// Three layers defend local-file reads served to loopback clients:
+	//   1. the loopback fence above (no LAN reach);
+	//   2. Host validation — a DNS-rebinding page can reach loopback but must
+	//      send this harness's host:port, so reject any other Host;
+	//   3. Origin validation — every browser request carries an Origin, and it
+	//      must be this harness's own origin; rebinding pages and cross-origin
+	//      <script>/<img> reads are rejected here. Non-browser clients (curl)
+	//      send no Origin and pass — the loopback fence + Host check remain
+	//      the base.
+	const hostHeader = req.headers.host;
+	if (hostHeader === undefined) {
+		res.writeHead(403);
+		res.end();
+		return;
+	}
+	// The Host must name a loopback host (127.0.0.1, ::1, localhost) and, when
+	// it carries a port, that port must be the harness's own local port. A Host
+	// without a port is fine: browsers default to the request port.
+	const hostMatch = /^(\[::1\]|::1|127\.0\.0\.1|localhost)(?::(\d+))?$/.exec(hostHeader.trim());
+	if (!hostMatch) {
+		res.writeHead(403);
+		res.end();
+		return;
+	}
+	if (hostMatch[2] !== undefined && Number(hostMatch[2]) !== req.socket.localPort) {
+		res.writeHead(403);
+		res.end();
+		return;
+	}
+	// Origin (all browser requests carry one): must be http(s)://127.0.0.1:
+	// <localPort> or http(s)://localhost:<localPort>. No Origin (non-browser
+	// client) passes — that is the accepted base.
+	const origin = req.headers.origin;
+	if (origin !== undefined) {
+		const originMatch = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|::1):(\d+)\/?$/.exec(origin);
+		if (!originMatch || Number(originMatch[2]) !== req.socket.localPort) {
+			res.writeHead(403);
+			res.end();
+			return;
+		}
+	}
 	let decoded;
 	try {
 		decoded = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
@@ -212,8 +253,14 @@ async function serveDshdFile(req, res) {
 	let mime = mimeOf(path);
 	if (mime === "text/html; charset=utf-8") {
 		const bridge = Buffer.from(DSHD_FILE_BRIDGE, "utf8");
-		const index = body.indexOf(Buffer.from("</head>", "utf8"));
-		body = index === -1 ? Buffer.concat([bridge, body]) : Buffer.concat([body.subarray(0, index), bridge, body.subarray(index)]);
+		// Skip injection if this page was already bridged (e.g. a previously
+		// served copy) so the bridge is never duplicated.
+		if (!body.includes(Buffer.from('source:"dshd-file"', "utf8"))) {
+			// Match "</head>" case-insensitively on a latin1 copy (latin1 is
+			// 1:1 with bytes, so offsets stay valid on the original Buffer).
+			const index = body.toString("latin1").toLowerCase().indexOf("</head>");
+			body = index === -1 ? Buffer.concat([bridge, body]) : Buffer.concat([body.subarray(0, index), bridge, body.subarray(index)]);
+		}
 	}
 	res.writeHead(200, {
 		"content-type": mime,
@@ -269,10 +316,20 @@ async function serveDshdAsset(req, res) {
 		res.end();
 		return;
 	}
-	// Resolve against the assets root and confirm the result stays inside it,
-	// so `..` segments cannot escape into the harness's own files.
+	// The name must be a bare file name: no separators and no `..` segments,
+	// so it can never escape the assets dir no matter how the client encodes it.
+	if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	// Resolve against the assets root and confirm the result stays inside it.
+	// path.relative is used rather than a string-prefix check because the
+	// latter is wrong on Windows — node:path emits backslash separators there,
+	// so `path.startsWith(dir + "/")` would fail for every legit asset.
 	const path = normalize(join(DSHD_ASSET_DIR, name));
-	if (!path.startsWith(DSHD_ASSET_DIR + "/")) {
+	const rel = relative(DSHD_ASSET_DIR, path);
+	if (rel === "" || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
 		res.writeHead(404);
 		res.end();
 		return;
