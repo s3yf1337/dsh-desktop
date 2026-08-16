@@ -143,14 +143,85 @@ pub async fn fetch_latest() -> Result<Option<GitHubRelease>, String> {
 	}
 }
 
+/// A version that can also carry a *letter patch* — a trailing-letter hotfix
+/// suffix that is not valid strict semver (`0.2.3a`). Strict semver parses
+/// first and wins when it succeeds; the letter form is only consulted when
+/// strict parsing fails, so ordinary tags behave exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedVersion {
+	Strict(semver::Version),
+	Letter {
+		major: u64,
+		minor: u64,
+		patch: u64,
+		/// The trailing letters, lowercased (`"a"`, `"ab"`…).
+		suffix: String,
+	},
+}
+
+/// Parse `input` as strict semver (optionally with a leading `v`), falling
+/// back to the letter-patch form `v?<major>.<minor>.<patch><letters>` when
+/// strict parsing fails. Anything else returns `None`.
+fn parse_loose(input: &str) -> Option<ParsedVersion> {
+	let input = input.strip_prefix('v').unwrap_or(input);
+	if let Ok(version) = semver::Version::parse(input) {
+		return Some(ParsedVersion::Strict(version));
+	}
+	// Letter patch: exactly three dot-separated parts, the last one being
+	// digits immediately followed by letters (e.g. "0.2.3a", "0.2.3aa").
+	let mut parts = input.split('.');
+	let major = parts.next()?.parse::<u64>().ok()?;
+	let minor = parts.next()?.parse::<u64>().ok()?;
+	let tail = parts.next()?;
+	if parts.next().is_some() {
+		return None; // more than three parts — not a letter patch
+	}
+	let digit_len = tail.bytes().take_while(|byte| byte.is_ascii_digit()).count();
+	if digit_len == 0 || digit_len == tail.len() {
+		return None; // no digits, or no letters at all (plain numbers parse above)
+	}
+	let patch = tail[..digit_len].parse::<u64>().ok()?;
+	let suffix = tail[digit_len..].to_ascii_lowercase();
+	if !suffix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+		return None;
+	}
+	Some(ParsedVersion::Letter { major, minor, patch, suffix })
+}
+
+/// Order two parsed versions. Letter patches rank above any strict version of
+/// the same core: a hotfix release beats both the plain release and its
+/// prereleases (`0.2.3-pre < 0.2.3 < 0.2.3a < 0.2.3b < 0.2.4`). When both
+/// sides are strict semver the crate's exact ordering is used, so prerelease
+/// and build-metadata semantics stay untouched.
+fn version_cmp(left: &ParsedVersion, right: &ParsedVersion) -> std::cmp::Ordering {
+	match (left, right) {
+		(ParsedVersion::Strict(left), ParsedVersion::Strict(right)) => left.cmp(right),
+		(ParsedVersion::Letter { major, minor, patch, suffix }, ParsedVersion::Letter { major: rm, minor: rmin, patch: rp, suffix: rs }) => {
+			(major, minor, patch, suffix).cmp(&(rm, rmin, rp, rs))
+		}
+		// Mixed: the letter side is a release of its core, so it is newer than
+		// any strict version of the SAME core (prereleases included), while a
+		// different core orders numerically.
+		(ParsedVersion::Letter { major, minor, patch, .. }, ParsedVersion::Strict(right)) => {
+			(*major, *minor, *patch).cmp(&(right.major, right.minor, right.patch)).then(std::cmp::Ordering::Greater)
+		}
+		(ParsedVersion::Strict(left), ParsedVersion::Letter { major, minor, patch, .. }) => {
+			(left.major, left.minor, left.patch).cmp(&(*major, *minor, *patch)).then(std::cmp::Ordering::Less)
+		}
+	}
+}
+
 /// Compare a release tag with the running version. Returns `Some(true)` when
-/// the tag is a *newer* semver than `current`; `None` when either side is not
-/// a parseable semver (unreleased/rolling tags are ignored).
+/// the tag is a *newer* version than `current`; `None` when either side is
+/// not parseable at all (unreleased/rolling tags are ignored).
+///
+/// Accepts strict semver tags (`v0.2.4`) and letter patches (`v0.2.3a`), which
+/// rank between the plain patch and the next one — so a hotfix release after
+/// `0.2.3` is correctly suggested to `0.2.3` clients.
 pub fn compare(current: &str, tag: &str) -> Option<bool> {
-	let tag_clean = tag.strip_prefix('v').unwrap_or(tag);
-	let current = semver::Version::parse(current).ok()?;
-	let candidate = semver::Version::parse(tag_clean).ok()?;
-	Some(candidate > current)
+	let current = parse_loose(current)?;
+	let candidate = parse_loose(tag)?;
+	Some(version_cmp(&candidate, &current) == std::cmp::Ordering::Greater)
 }
 
 /// Build the `UpdateInfo` for a newer release, or `None` when the tag is not
@@ -169,4 +240,61 @@ pub fn update_info_for(current: &str, release: &GitHubRelease) -> Option<UpdateI
 		url,
 		published_at: release.published_at.clone(),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn letter_patch_ranks_between_patch_and_next_minor() {
+		// The headline case: a hotfix release after 0.2.3 is newer than 0.2.3
+		// itself, so the in-app updater suggests it.
+		assert_eq!(compare("0.2.3", "v0.2.3a"), Some(true));
+		assert_eq!(compare("0.2.3", "0.2.3a"), Some(true));
+		assert_eq!(compare("0.2.3a", "0.2.3"), Some(false));
+		assert_eq!(compare("0.2.3", "0.2.4"), Some(true));
+		assert_eq!(compare("0.2.3a", "0.2.4"), Some(true));
+		// A letter patch of an older core is still older.
+		assert_eq!(compare("0.2.3a", "0.2.2z"), Some(false));
+		assert_eq!(compare("0.2.2z", "0.2.3a"), Some(true));
+	}
+
+	#[test]
+	fn letter_patches_order_among_themselves() {
+		assert_eq!(compare("0.2.3a", "0.2.3b"), Some(true));
+		assert_eq!(compare("0.2.3b", "0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3a", "0.2.3a"), Some(false));
+		// Prefix rule: "aa" > "a" (plain lexicographic order).
+		assert_eq!(compare("0.2.3a", "0.2.3aa"), Some(true));
+		assert_eq!(compare("0.2.3aa", "0.2.3ab"), Some(true));
+	}
+
+	#[test]
+	fn letter_patches_beat_prereleases_of_the_same_core() {
+		// A hotfix release ranks above prereleases of the same core.
+		assert_eq!(compare("0.2.3-rc.1", "0.2.3a"), Some(true));
+		assert_eq!(compare("0.2.3a", "0.2.3-rc.1"), Some(false));
+	}
+
+	#[test]
+	fn strict_semver_behavior_is_unchanged() {
+		assert_eq!(compare("0.2.3", "0.2.3"), Some(false));
+		assert_eq!(compare("0.2.3", "0.2.4-alpha"), Some(true));
+		assert_eq!(compare("0.2.3-alpha", "0.2.3"), Some(true));
+		assert_eq!(compare("0.2.3-alpha", "0.2.3-beta"), Some(true));
+		// The semver crate orders build metadata as a tiebreaker, so a tag
+		// with build metadata ranks above the plain version — pre-existing
+		// behavior, kept as-is.
+		assert_eq!(compare("0.2.3", "0.2.3+a"), Some(true));
+	}
+
+	#[test]
+	fn unparseable_tags_are_ignored() {
+		assert_eq!(compare("0.2.3", "rolling"), None);
+		assert_eq!(compare("0.2.3", "latest"), None);
+		assert_eq!(compare("0.2.3", "1.2"), None);
+		assert_eq!(compare("0.2.3", "0.2.3a.1"), None); // malformed letter patch
+		assert_eq!(compare("0.2.3", "0.2.3-"), None);
+	}
 }
