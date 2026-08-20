@@ -45,10 +45,10 @@ window.__ModuleLoader__.load({
 			IconLinkOutline16,
 			IconSendOutline14,
 			IconFolderClose16,
-			IconGlobeOutline16,
 			MarkdownText,
 			CodeBlock
 		} = _deepseek_ai_dsh_client_ui_primitives;
+		const IconGlobeOutline16 = _deepseek_ai_dsh_client_ui_primitives.IconGlobeOutline16 || IconGlobeOutline14;
 
 		const NS = "desktopShell";
 		// Declared services: cordis' tracker proxy throws on any ctx access to
