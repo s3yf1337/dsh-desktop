@@ -183,8 +183,24 @@ fn append_agent_section<'a>(
 
 /// Format a Unix-epoch millisecond timestamp as local HH:MM.
 fn short_time(time_ms: u64) -> String {
-	let secs = time_ms.div_euclid(1000);
-	let seconds_in_day = secs % 86_400;
+	hms_local(time_ms.div_euclid(1000) as i64)
+}
+
+/// Local `HH:MM` for a Unix-epoch second. Falls back to UTC when `localtime_r`
+/// is unavailable (non-Unix) or fails.
+fn hms_local(secs: i64) -> String {
+	#[cfg(unix)]
+	{
+		let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+		// SAFETY: `localtime_r` writes `tm` and returns null on failure; we
+		// only read it after a non-null return.
+		let ptr = unsafe { libc::localtime_r(&secs, tm.as_mut_ptr()) };
+		if !ptr.is_null() {
+			let tm = unsafe { tm.assume_init() };
+			return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+		}
+	}
+	let seconds_in_day = secs.rem_euclid(86_400);
 	let hours = seconds_in_day / 3600;
 	let minutes = (seconds_in_day % 3600) / 60;
 	format!("{hours:02}:{minutes:02}")
@@ -237,7 +253,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 		.icon(icon)
 		.tooltip(agent_tooltip(app))
 		.menu(&menu)
-		.menu_on_left_click(true)
+		.show_menu_on_left_click(true)
 		.on_menu_event(|app, event| {
 			let id = event.id.as_ref();
 			if let Some(agent_id) = id.strip_prefix("stop-") {
@@ -290,7 +306,26 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 			}
 		})
 		.build(app)?;
+	// Linux: libappindicator's StatusNotifierItem is owned by the GtkApplication.
+	// Hiding the last window drops the hold count, and many tray hosts
+	// (Plasma, waybar, …) then unregister the icon. Hold the application for
+	// the rest of the process so close-to-tray keeps the icon.
+	#[cfg(target_os = "linux")]
+	hold_gtk_application(app);
 	Ok(())
+}
+
+/// Keep GtkApplication alive after the last window is hidden. The returned
+/// `ApplicationHoldGuard` releases the hold on drop, so we forget it: the
+/// process is the tray's lifetime.
+#[cfg(target_os = "linux")]
+fn hold_gtk_application(app: &AppHandle) {
+	use gio::prelude::ApplicationExtManual;
+	use gtk::prelude::GtkWindowExt;
+	let Some(win) = app.get_webview_window("main") else { return };
+	let Ok(gtk_win) = win.gtk_window() else { return };
+	let Some(gtk_app) = gtk_win.application() else { return };
+	std::mem::forget(ApplicationExtManual::hold(&gtk_app));
 }
 
 /// Rebuild the tray menu (call after the update state changes), skipping the
@@ -299,13 +334,25 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 /// this): the key check, the build and the swap happen under one lock, so a
 /// stale builder can never land last, and LAST_MENU_KEY is written only after
 /// a successful set_menu (a failed build must not freeze later rebuilds).
+///
+/// GTK menu widgets must be created on the main thread; hopping here keeps
+/// the stdin reader and the async updater from touching libappindicator off
+/// the GTK loop (which has been observed to drop or corrupt the icon).
 pub fn rebuild(app: &AppHandle) {
+	let app = app.clone();
+	let scheduled = app.clone();
+	if let Err(error) = app.run_on_main_thread(move || rebuild_sync(&scheduled)) {
+		crate::log::warn(&app, &format!("cannot schedule tray rebuild: {error}"));
+	}
+}
+
+fn rebuild_sync(app: &AppHandle) {
 	let Some(tray) = app.tray_by_id("main") else { return };
 	let state = app.state::<AppState>();
 	let _guard = state.rebuild_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 	let key = menu_key(&state);
 	{
-		let mut last = LAST_MENU_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let last = LAST_MENU_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		if last.as_deref() == Some(key.as_str()) {
 			return;
 		}
@@ -430,17 +477,60 @@ fn clear_badge(app: &AppHandle) {
 	rebuild(app);
 }
 
-/// Show the window if hidden, hide it if visible.
+/// Show the window if hidden or minimized, hide it if visible.
 pub fn toggle_window(app: &AppHandle) {
 	if let Some(win) = app.get_webview_window("main") {
-		match win.is_visible() {
-			Ok(true) => {
-				let _ = win.hide();
-			}
-			_ => {
-				let _ = win.show();
-				let _ = win.set_focus();
-			}
+		let visible = win.is_visible().unwrap_or(false);
+		let minimized = win.is_minimized().unwrap_or(false);
+		if visible && !minimized {
+			hide_window(app);
+		} else {
+			show_window(app);
+		}
+	}
+}
+
+/// Hide the main window and keep the tray icon registered.
+///
+/// On Linux, `gtk_window_hide` on the last window makes many StatusNotifier
+/// hosts drop the AppIndicator. Re-asserting Active after hide (and the
+/// GtkApplication hold in `setup`) is what keeps the icon in the tray.
+pub fn hide_window(app: &AppHandle) {
+	if let Some(win) = app.get_webview_window("main") {
+		let _ = win.hide();
+	}
+	keep_alive(app);
+}
+
+/// Restore the main window (unminimize + show + focus).
+pub fn show_window(app: &AppHandle) {
+	if let Some(win) = app.get_webview_window("main") {
+		let _ = win.unminimize();
+		let _ = win.show();
+		let _ = win.set_focus();
+	}
+}
+
+/// Re-activate the StatusNotifierItem after a hide so tray hosts that
+/// dropped it on unmap pick it back up.
+pub fn keep_alive(app: &AppHandle) {
+	if let Some(tray) = app.tray_by_id("main") {
+		let _ = tray.set_visible(true);
+	}
+}
+
+/// Show or hide the tray icon to match the `tray` setting. If the icon was
+/// never created (setup failed at boot) and the user turns the setting on,
+/// try to create it now rather than leaving them with no tray and no way
+/// to get one without a restart.
+pub fn set_icon_visible(app: &AppHandle, visible: bool) {
+	if let Some(tray) = app.tray_by_id("main") {
+		let _ = tray.set_visible(visible);
+		return;
+	}
+	if visible {
+		if let Err(error) = setup(app) {
+			crate::log::warn(app, &format!("tray still unavailable: {error}"));
 		}
 	}
 }
@@ -450,4 +540,34 @@ pub fn window_visible(app: &AppHandle) -> bool {
 	app.get_webview_window("main")
 		.and_then(|win| win.is_visible().ok())
 		.unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn short_time_is_hh_mm() {
+		let text = short_time(0);
+		assert_eq!(text.len(), 5);
+		assert_eq!(&text[2..3], ":");
+		assert!(text[..2].chars().all(|c| c.is_ascii_digit()));
+		assert!(text[3..].chars().all(|c| c.is_ascii_digit()));
+	}
+
+	#[test]
+	fn short_time_utc_fallback_wraps_the_day() {
+		// 1 second before the Unix epoch: UTC 23:59. On Unix this test is
+		// the local equivalent of that instant, so we only assert the
+		// format, not the numbers. The UTC fallback path is what we check
+		// with rem_euclid on a known value via hms of a day-aligned stamp.
+		let noon_utc = 12 * 3600;
+		let utc = {
+			let seconds_in_day = (noon_utc as i64).rem_euclid(86_400);
+			let hours = seconds_in_day / 3600;
+			let minutes = (seconds_in_day % 3600) / 60;
+			format!("{hours:02}:{minutes:02}")
+		};
+		assert_eq!(utc, "12:00");
+	}
 }

@@ -77,6 +77,14 @@ panic = "abort"
 # Set the GTK application name so the system tray (libappindicator) shows
 # "DeepSeek Harness" instead of the binary name on hover. Linux-only: glib is
 # a GTK binding and does not build on Windows/macOS (the tray title there
-# comes from other channels).
+# comes from other channels). `gtk`/`gio` hold the GtkApplication so hiding
+# the last window does not unregister the StatusNotifierItem.
 [target.'cfg(target_os = "linux")'.dependencies]
 glib = "0.18"
+gio = "0.18"
+gtk = "0.18"
+
+# localtime_r for the tray's "finished at HH:MM" (the comment promised local
+# time; a UTC remainder is wrong for anyone not on UTC).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -88,14 +88,12 @@ pub fn desktop_set_setting(app: AppHandle, key: String, value: serde_json::Value
 			use tauri_plugin_notification::NotificationExt;
 			let _ = app.notification().request_permission();
 		}
-		if key == "tray" && !tray_enabled {
-			// Never strand the user: with the tray off, a hidden window would
-			// be unreachable — show it.
-			if let Some(win) = app.get_webview_window("main") {
-				if win.is_visible().unwrap_or(false) == false {
-					let _ = win.show();
-					let _ = win.set_focus();
-				}
+		if key == "tray" {
+			crate::tray::set_icon_visible(&app, tray_enabled);
+			if !tray_enabled {
+				// Never strand the user: with the tray off, a hidden window would
+				// be unreachable — show it.
+				crate::tray::show_window(&app);
 			}
 		}
 		crate::update::emit_and_rebuild(&app);

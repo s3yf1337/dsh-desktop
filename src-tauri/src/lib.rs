@@ -252,6 +252,7 @@ fn run_window(raw: String) -> i32 {
 	if std::env::var_os("DSH_DESKTOP_NO_SINGLE_INSTANCE").is_none() {
 		builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
 			if let Some(win) = app.get_webview_window("main") {
+				let _ = win.unminimize();
 				let _ = win.show();
 				let _ = win.set_focus();
 			}
@@ -328,6 +329,11 @@ fn run_window(raw: String) -> i32 {
 			if let Err(error) = tray::setup(app.handle()) {
 				log::warn(app.handle(), &format!("tray unavailable, falling back to close-exits: {error}"));
 				app.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tray = false;
+			} else if !app.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tray {
+				// Setting is off but setup succeeded: keep the icon built so
+				// turning the setting back on is just set_visible, but don't
+				// show it while the user asked it off.
+				tray::set_icon_visible(app.handle(), false);
 			}
 
 			// Ask for notification permission once (no-op on Linux, prompt on
@@ -531,9 +537,7 @@ fn run_window(raw: String) -> i32 {
 				let tray_enabled = state.settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tray;
 				if tray_enabled && !update::quitting(app_handle) {
 					api.prevent_close();
-					if let Some(win) = app_handle.get_webview_window("main") {
-						let _ = win.hide();
-					}
+					crate::tray::hide_window(app_handle);
 					// One-time hint so the user knows the app stayed alive.
 					if !update::tray_hide_hint_shown(app_handle) {
 						let notifications = app_handle.state::<AppState>().settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).notifications;
