@@ -228,9 +228,16 @@ pub fn desktop_hexdump(path: String) -> Result<HexDump, String> {
 			.read_to_end(&mut data)
 			.map_err(|error| format!("cannot read {path}: {error}"))?;
 	}
+	Ok(HexDump { path, name, size, text: format_hexdump(&data), truncated: size > HEXDUMP_CAP })
+}
+
+/// Classic hex dump: `offset  hex bytes  |ascii|`, 16 bytes per row. `offset`
+/// is the byte index, not the row index.
+fn format_hexdump(data: &[u8]) -> String {
 	let mut text = String::with_capacity(data.len() * 4);
-	for (offset, chunk) in data.chunks(16).enumerate() {
+	for (row, chunk) in data.chunks(16).enumerate() {
 		use std::fmt::Write;
+		let offset = row * 16;
 		let _ = write!(text, "{offset:08x}  ");
 		for (i, byte) in chunk.iter().enumerate() {
 			let _ = write!(text, "{byte:02x} ");
@@ -238,9 +245,9 @@ pub fn desktop_hexdump(path: String) -> Result<HexDump, String> {
 				text.push(' ');
 			}
 		}
-		for _ in chunk.len()..16 {
+		for i in chunk.len()..16 {
 			text.push_str("   ");
-			if chunk.len() <= 8 {
+			if i == 7 {
 				text.push(' ');
 			}
 		}
@@ -251,7 +258,7 @@ pub fn desktop_hexdump(path: String) -> Result<HexDump, String> {
 		}
 		text.push_str("|\n");
 	}
-	Ok(HexDump { path, name, size, text, truncated: size > HEXDUMP_CAP })
+	text
 }
 
 /// Write (create or overwrite) one text file. Backs "new file", inline
@@ -539,6 +546,8 @@ mod tests {
 		assert!(!out.truncated);
 		assert!(out.text.starts_with("00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f  |"),
 			"first row malformed: {}", out.text.lines().next().unwrap_or(""));
+		let second = out.text.lines().nth(1).unwrap_or("");
+		assert!(second.starts_with("00000010  "), "second row offset must be the byte index 0x10, not the row index: {second}");
 		assert!(out.text.contains("10 11 12 13 14 15 16 17  18 19 1a 1b 1c 1d 1e 1f"), "second row missing");
 		assert!(out.text.contains("|................|"), "ascii column malformed");
 		rm(&path);
@@ -549,6 +558,15 @@ mod tests {
 		assert!(out.truncated, "expected truncated for a file over the cap");
 		assert_eq!(out.text.lines().count() as u64, HEXDUMP_CAP / 16, "rows must match the cap");
 		rm(&path);
+	}
+
+	#[test]
+	fn hexdump_short_row_keeps_the_midline_gap() {
+		// 5 bytes: padding must still insert the gap after byte 7 so the
+		// ascii column lines up with full rows.
+		let text = format_hexdump(&[0x61, 0x62, 0x63, 0x64, 0x65]);
+		assert!(text.starts_with("00000000  61 62 63 64 65"), "{text}");
+		assert!(text.contains(" |abcde|"), "ascii column misplaced: {text}");
 	}
 
 	#[test]
