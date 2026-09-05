@@ -12,9 +12,13 @@ import z from "@deepseek-ai/schemastery";
  *
  * The bundle patch adds one row over the web surface (dsh-base + dsh-web-app):
  * after the web server binds, this plugin spawns the `dsh-desktop-shell`
- * native client on the served loopback URL. The client is a plain render
- * surface — it shows the exact same origin a browser would, so the `/api`
- * bridge, WebSockets, and the whole SPA work unchanged and same-origin — and
+ * native client on the served loopback URL. The URL carries the harness
+ * process launch token (dsh ≥ 0.1.2 fences the surface behind it — the
+ * connection service's `authenticatedUrl` builds the same URL `dsh web`
+ * prints; its first GET mints the persistent signed cookie the rest of the
+ * session rides). The client is a plain render surface — it shows the exact
+ * same origin a browser would, so the `/api` bridge, WebSockets, and the
+ * whole SPA work unchanged and same-origin — and
  * exits with code 0 when its window is closed, which this plugin treats as a
  * request to shut the harness down (`ctx.appExit`).
  *
@@ -572,7 +576,16 @@ function apply(ctx, config) {
 	const open = () => {
 		const server = ctx.get("webServer");
 		if (server === void 0) return;
-		const url = `http://${LOOPBACK_HOST}:${server.port}`;
+		const base = `http://${LOOPBACK_HOST}:${server.port}`;
+		// dsh ≥ 0.1.2 fences the web surface behind a process launch token: the
+		// first authenticated GET of the tokenized root mints a persistent
+		// signed cookie, and every later request rides it. The connection
+		// service owns that token (it builds the same URL `dsh web` prints);
+		// a composition without the row keeps the plain loopback URL.
+		const connection = ctx.get("connection");
+		const url = typeof connection?.authenticatedUrl === "function"
+			? connection.authenticatedUrl(base)
+			: base;
 		let bin;
 		try {
 			bin = resolveShellBinary(config.bin);
