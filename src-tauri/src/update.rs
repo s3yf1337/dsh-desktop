@@ -51,7 +51,7 @@ pub async fn run_check(app: &AppHandle, with_notification: bool) {
 	let state = app.state::<AppState>();
 	match result {
 		Ok(Some(release)) => {
-			let current = env!("CARGO_PKG_VERSION");
+			let current = crate::updater::current_version();
 			match crate::updater::update_info_for(current, &release) {
 				Some(info) => {
 					let newly_available = {
@@ -210,7 +210,7 @@ async fn download_and_apply_inner(app: &AppHandle) -> Result<String, String> {
 	let release = crate::updater::fetch_latest()
 		.await?
 		.ok_or_else(|| "no releases published yet".to_string())?;
-	let current = env!("CARGO_PKG_VERSION");
+	let current = crate::updater::current_version();
 	let _info = crate::updater::update_info_for(current, &release)
 		.ok_or_else(|| format!("already up to date (v{current})"))?;
 	let asset = crate::updater::find_platform_asset(&release)
@@ -463,7 +463,7 @@ async fn apply_tarball_windows(
 /// redirect policy (a redirected download must never downgrade to plain HTTP).
 fn client_with_policy(app: &AppHandle, timeout: Duration) -> reqwest::Client {
 	reqwest::Client::builder()
-		.user_agent(concat!("dsh-desktop/", env!("CARGO_PKG_VERSION")))
+		.user_agent(format!("dsh-desktop/{}", crate::updater::current_version()))
 		.timeout(timeout)
 		.redirect(reqwest::redirect::Policy::custom(|attempt| {
 			if attempt.url().scheme() == "https" {

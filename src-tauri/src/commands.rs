@@ -15,7 +15,7 @@ pub fn snapshot(app: &AppHandle) -> DesktopState {
 	let last_update_check = state.last_check.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	let update_check_error = state.check_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	DesktopState {
-		version: env!("CARGO_PKG_VERSION").to_string(),
+		version: crate::updater::current_version().to_string(),
 		settings,
 		update,
 		last_update_check,

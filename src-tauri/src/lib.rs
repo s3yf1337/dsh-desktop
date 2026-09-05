@@ -132,7 +132,7 @@ pub fn run() {
 			install::run(prefix.as_deref())
 		}
 		Some("--version") | Some("-V") => {
-			println!("dsh-desktop-shell {}", env!("CARGO_PKG_VERSION"));
+			println!("dsh-desktop-shell {}", crate::updater::current_version());
 			0
 		}
 		Some("--help") | Some("-h") | Some("help") => {

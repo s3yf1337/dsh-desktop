@@ -48,6 +48,34 @@ jobs:
       - name: Install tauri-cli (prebuilt, fast)
         run: npm install -g @tauri-apps/cli@^2
 
+      - name: Sync version from tag (letter patches → +<letters>)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Tag: $GITHUB_REF_NAME → $TAG"
+          # Letter patch like 0.2.3a, 0.2.3ab: digits.digits.digits + trailing letters
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z]+$ ]]; then
+            CORE=$(echo "$TAG" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)[a-zA-Z]+$/\1/')
+            SUFFIX=$(echo "$TAG" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+//')
+            SEMVER="${CORE}+${SUFFIX}"
+            echo "Letter patch $TAG → semver $SEMVER (Cargo/tauri/bundle)"
+            # Cargo.toml: version = "x" → "x+letters" (valid semver)
+            sed -i -E "s/^version = \"[^\"]+\"/version = \"$SEMVER\"/" src-tauri/Cargo.toml
+            # tauri.conf.json: "version": "x" → "x+letters"
+            sed -i -E "s/\"version\": \"[^\"]+\"/\"version\": \"$SEMVER\"/" src-tauri/tauri.conf.json
+            # bundle/package.json
+            sed -i -E "s/\"version\": \"[^\"]+\"/\"version\": \"$SEMVER\"/" bundle/package.json
+            echo "--- Cargo.toml ---"
+            grep -m1 '^version' src-tauri/Cargo.toml
+            echo "--- tauri.conf.json ---"
+            grep '"version"' src-tauri/tauri.conf.json | head -1
+            echo "--- bundle/package.json ---"
+            grep '"version"' bundle/package.json | head -1
+          else
+            echo "Plain semver tag ($TAG), no patching needed"
+          fi
+
       - name: Build + bundle (${{ matrix.bundles }})
         working-directory: src-tauri
         run: tauri build --bundles ${{ matrix.bundles }}

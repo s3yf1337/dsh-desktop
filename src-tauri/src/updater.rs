@@ -99,13 +99,22 @@ pub fn find_checksum_asset<'a>(release: &'a GitHubRelease, tarball_name: &str) -
 		.find(|asset| asset.name == format!("{tarball_name}.sha256"))
 }
 
+/// The running desktop version, including a trailing letter patch (e.g.
+/// `0.2.3a`) when the binary was built from a `v0.2.3a` tag. Cargo itself
+/// cannot publish `0.2.3a`, so the CI build injects the full version through
+/// `DSH_DESKTOP_VERSION` (see `build.rs`); local `cargo build` falls back to
+/// the crate version.
+pub fn current_version() -> &'static str {
+	option_env!("DSH_DESKTOP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// Query GitHub for the latest non-draft, non-prerelease release.
 ///
 /// Returns `Ok(None)` when the repo has no releases yet (404) — that is the
 /// normal "up to date" answer, not an error.
 pub async fn fetch_latest() -> Result<Option<GitHubRelease>, String> {
 	let client = reqwest::Client::builder()
-		.user_agent(concat!("dsh-desktop/", env!("CARGO_PKG_VERSION")))
+		.user_agent(format!("dsh-desktop/{}", current_version()))
 		.timeout(std::time::Duration::from_secs(15))
 		.redirect(reqwest::redirect::Policy::custom(|attempt| {
 			if attempt.url().scheme() == "https" {
@@ -147,8 +156,14 @@ pub async fn fetch_latest() -> Result<Option<GitHubRelease>, String> {
 /// suffix that is not valid strict semver (`0.2.3a`). Strict semver parses
 /// first and wins when it succeeds; the letter form is only consulted when
 /// strict parsing fails, so ordinary tags behave exactly as before.
+///
+/// Cargo itself cannot publish `0.2.3a` (strict semver required), so CI builds
+/// for letter patches publish the binary as `0.2.3+a` (build metadata) and this
+/// parser normalises such `+<letters>` builds back to the `Letter` variant, so
+/// `0.2.3a` and `0.2.3+a` compare equal and the updater understands it is
+/// already on the latest letter patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ParsedVersion {
+pub(crate) enum ParsedVersion {
 	Strict(semver::Version),
 	Letter {
 		major: u64,
@@ -159,12 +174,42 @@ enum ParsedVersion {
 	},
 }
 
+impl std::fmt::Display for ParsedVersion {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ParsedVersion::Strict(v) => write!(f, "{v}"),
+			ParsedVersion::Letter { major, minor, patch, suffix } => write!(f, "{major}.{minor}.{patch}{suffix}"),
+		}
+	}
+}
+
 /// Parse `input` as strict semver (optionally with a leading `v`), falling
 /// back to the letter-patch form `v?<major>.<minor>.<patch><letters>` when
 /// strict parsing fails. Anything else returns `None`.
-fn parse_loose(input: &str) -> Option<ParsedVersion> {
+///
+/// A strict version whose *only* non-core data is pure-letter build metadata
+/// (`0.2.3+a`, `0.2.3+ab`) is normalised to the `Letter` variant so the Cargo
+/// representation `0.2.3+a` of a `v0.2.3a` release compares equal to the tag.
+pub(crate) fn parse_loose(input: &str) -> Option<ParsedVersion> {
 	let input = input.strip_prefix('v').unwrap_or(input);
 	if let Ok(version) = semver::Version::parse(input) {
+		// Normalise `0.2.3+<letters>` → Letter, so a binary built as
+		// `0.2.3+a` (the only valid semver spelling for a `v0.2.3a` tag) is
+		// considered the same version as the tag itself. The build must be
+		// pure ascii letters and prerelease must be empty — anything more
+		// complex stays Strict and keeps the crate's exact ordering (e.g.
+		// `0.2.3-alpha` stays a prerelease, not a letter patch).
+		if !version.build.is_empty() && version.pre.is_empty() {
+			let build = version.build.as_str();
+			if build.chars().all(|ch| ch.is_ascii_alphabetic()) {
+				return Some(ParsedVersion::Letter {
+					major: version.major,
+					minor: version.minor,
+					patch: version.patch,
+					suffix: build.to_ascii_lowercase(),
+				});
+			}
+		}
 		return Some(ParsedVersion::Strict(version));
 	}
 	// Letter patch: exactly three dot-separated parts, the last one being
@@ -193,7 +238,7 @@ fn parse_loose(input: &str) -> Option<ParsedVersion> {
 /// prereleases (`0.2.3-pre < 0.2.3 < 0.2.3a < 0.2.3b < 0.2.4`). When both
 /// sides are strict semver the crate's exact ordering is used, so prerelease
 /// and build-metadata semantics stay untouched.
-fn version_cmp(left: &ParsedVersion, right: &ParsedVersion) -> std::cmp::Ordering {
+pub(crate) fn version_cmp(left: &ParsedVersion, right: &ParsedVersion) -> std::cmp::Ordering {
 	match (left, right) {
 		(ParsedVersion::Strict(left), ParsedVersion::Strict(right)) => left.cmp(right),
 		(ParsedVersion::Letter { major, minor, patch, suffix }, ParsedVersion::Letter { major: rm, minor: rmin, patch: rp, suffix: rs }) => {
@@ -245,6 +290,33 @@ pub fn update_info_for(current: &str, release: &GitHubRelease) -> Option<UpdateI
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn cargo_build_metadata_letter_is_equal_to_tag_letter() {
+		// CI builds a `v0.2.3a` tag as Cargo version `0.2.3+a` (the only valid
+		// semver spelling). The updater must understand that the binary built
+		// this way is *already* on `v0.2.3a`, not behind it.
+		assert_eq!(compare("0.2.3+a", "v0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3a", "0.2.3+a"), Some(false));
+		assert_eq!(compare("0.2.3+a", "0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3+b", "0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3+a", "0.2.3b"), Some(true));
+		assert_eq!(compare("0.2.3+a", "0.2.3"), Some(false));
+		assert_eq!(compare("0.2.3", "0.2.3+a"), Some(true));
+		// Upper-case build is normalised the same way.
+		assert_eq!(compare("0.2.3+A", "0.2.3a"), Some(false));
+	}
+
+	#[test]
+	fn already_on_latest_letter_patch_is_not_newer() {
+		// The reported bug: the updater must not keep offering the same
+		// letter patch once the binary already reports that patch version.
+		assert_eq!(compare("0.2.3a", "v0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3+a", "v0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3a", "0.2.3a"), Some(false));
+		assert_eq!(compare("v0.2.3a", "0.2.3a"), Some(false));
+		assert_eq!(compare("0.2.3b", "0.2.3b"), Some(false));
+	}
 
 	#[test]
 	fn letter_patch_ranks_between_patch_and_next_minor() {

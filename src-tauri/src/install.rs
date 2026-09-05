@@ -166,12 +166,15 @@ fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
 /// Read the `version` field from a bundle's `package.json`. Returns `None` when
 /// the file is missing or unparseable (a version guard must not break installs/
 /// updates, so callers fall back to "always replace" in that case).
-fn bundle_version(dir: &Path) -> Option<semver::Version> {
+///
+/// Letter patches (`0.2.3a` or its Cargo spelling `0.2.3+a`) are understood, so
+/// a hotfix bundle ranks above the plain `0.2.3` bundle of the same core.
+fn bundle_version(dir: &Path) -> Option<crate::updater::ParsedVersion> {
 	let pkg = dir.join("package.json");
 	let text = fs::read_to_string(pkg).ok()?;
 	let value: serde_json::Value = serde_json::from_str(&text).ok()?;
 	let version = value.get("version")?.as_str()?;
-	semver::Version::parse(version).ok()
+	crate::updater::parse_loose(version)
 }
 
 /// Write the plugin bundle into the profile atomically: the new contents are
@@ -194,7 +197,7 @@ fn install_bundle_from(profile: &Path, source: Option<&Path>) -> std::io::Result
 	// "replace as usual" — this must never break a legit update.
 	if bundle_dir.exists() {
 		if let (Some(new_version), Some(installed)) = (version_of(source), bundle_version(&bundle_dir)) {
-			if new_version < installed {
+			if crate::updater::version_cmp(&new_version, &installed) == std::cmp::Ordering::Less {
 				// Skip the rewrite entirely; report success so the caller's
 				// upgrade flow keeps working.
 				eprintln!(
@@ -256,7 +259,7 @@ fn install_bundle_from(profile: &Path, source: Option<&Path>) -> std::io::Result
 
 /// The new bundle's version for the guard: from the source directory if one is
 /// given (the updater's extracted release), else from the embedded copy.
-fn version_of(source: Option<&Path>) -> Option<semver::Version> {
+fn version_of(source: Option<&Path>) -> Option<crate::updater::ParsedVersion> {
 	match source {
 		Some(dir) => bundle_version(dir),
 		None => bundle_version_from_embedded(),
@@ -264,14 +267,14 @@ fn version_of(source: Option<&Path>) -> Option<semver::Version> {
 }
 
 /// Parse the `version` field of the embedded `package.json` (`BUNDLE_FILES`).
-fn bundle_version_from_embedded() -> Option<semver::Version> {
+fn bundle_version_from_embedded() -> Option<crate::updater::ParsedVersion> {
 	let pkg = BUNDLE_FILES
 		.iter()
 		.find(|(relative, _)| *relative == "package.json")?
 		.1;
 	let value: serde_json::Value = serde_json::from_str(pkg).ok()?;
 	let version = value.get("version")?.as_str()?;
-	semver::Version::parse(version).ok()
+	crate::updater::parse_loose(version)
 }
 
 /// Atomically replace `bundle_dir` with the staged `tmp_dir`, routing through
